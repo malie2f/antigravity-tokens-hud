@@ -1,0 +1,44 @@
+{
+  "name": "antigravity-tokens-hud",
+  "version": "1.0.0",
+  "description": "Real-time token speed, context caching hit rate, and activity heatmap HUD for Google Antigravity 2.0",
+  "main": "index.js",
+  "bin": {
+    "antigravity-tokens-hud": "./index.js",
+    "agy-tokens-hud": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node index.js"
+  },
+  "keywords": [
+    "antigravity",
+    "antigravity-2.0",
+    "gemini",
+    "gemini-3.8",
+    "gemini-4",
+    "tokens",
+    "tps",
+    "context-caching",
+    "quota",
+    "hud",
+    "devtools",
+    "ai"
+  ],
+  "author": "malie2f",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/malie2f/antigravity-tokens-hud.git"
+  },
+  "bugs": {
+    "url": "https://github.com/malie2f/antigravity-tokens-hud/issues"
+  },
+  "homepage": "https://github.com/malie2f/antigravity-tokens-hud#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "optionalDependencies": {
+    "ws": "^8.18.0"
+  }
+}

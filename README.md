@@ -1,0 +1,143 @@
+# ⚡ Antigravity Tokens & Performance HUD
+
+<p align="center">
+  <strong>专为 Google Antigravity 打造的原生风实时速度、上下文缓存命中率与 Token 活动热力监控面板</strong><br>
+  <em>Real-time generation speed, context caching hit rate, and activity heatmap HUD for Google Antigravity 2.0.</em>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" alt="MIT License">
+  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-brightgreen.svg?style=flat-square" alt="Platform">
+  <img src="https://img.shields.io/badge/Antigravity-2.0-blueviolet.svg?style=flat-square" alt="Antigravity 2.0">
+  <img src="https://img.shields.io/badge/Privacy-100%25%20Local%20IPC-success.svg?style=flat-square" alt="100% Local">
+</p>
+
+---
+
+## ✨ 核心特性 / Features
+
+* ⚡ **真实端到端生成速度（True TPS）**  
+  精确解析模型底层耗时结构，清晰分离**首字思考延迟（TTFT）**与**流式输出耗时（Streaming Duration）**，同时展示单轮实时速度与会话全局平均速度，杜绝千级虚高假速度。
+* 🧠 **精确上下文占用与缓存命中率（Context & Cache Hit）**  
+  以极简的 `已用/总共 百分之`（如 `232.0k/1M 23.2%`）展示当前会话上下文容量，并支持 **Gemini 上下文缓存（Context Caching）命中率**追踪（单轮命中率 + 会话累计命中率）。
+* 📅 **25 周紧凑型「Token 活动」热力矩阵（Activity Heatmap）**  
+  无缝还原 Antigravity 原生「Token 活动」体验：
+  * **每天视图**：25 周（175 天）高密度 Google 蓝贡献方块，鼠标悬停展示精确日期与 Token 数量 Tooltip；
+  * **每周视图**：近 12 周使用量直方分布柱；
+  * **累计总量**：提示词输入、生成输出、深度思考与上下文缓存细分统计。
+* ⏱️ **官方限额实时同步（Gemini Quotas）**  
+  零网络轮询，通过组件树无缝调取官方配额引擎，周额度与 5h limit 剩余比例、倒计时及环形进度条毫秒级同步。
+* 🎨 **原生深色主题对齐（Native Onyx Aesthetics）**  
+  完全移除突兀的浮动药丸/气泡框，与 Antigravity 底栏模型选择器（`button[data-testid="model-selector-trigger"]`）保持 100% 相同字号、间距与幽灵悬浮交互质感。
+* 🔒 **纯本地离线运行，安全无侵入（Zero Network / Safe IPC）**  
+  不走任何外部网络代理，不收集账号密码或凭据，完全遵循 Google ToS，纯粹基于本地 CDP（Chrome DevTools Protocol）调试端口与本地对话 SQLite 数据库进行内存级只读提取。
+
+---
+
+## 📸 界面预览 / Preview
+
+### 底栏集成（紧贴模型选择器）
+```text
+[ Gemini 3.8 Flash 高 ^ ]  [ ⚡ 69.5 tok/s  146.5k/1M 14.7%  5h ◯ ]
+```
+
+### 展开详情面板（极简原生暗黑风）
+```text
+┌────────────────────────────────────────────────────────┐
+│ 用量与性能                                      ✕ 关闭 │
+├────────────────────────────────────────────────────────┤
+│ 实时性能                                               │
+│ 生成速度               最近: 2828 tok · 40.7s  69.5 tok/s│
+│ 会话平均速度            (21轮 · 峰值 80.9)     45.3 tok/s│
+│ 当前会话上下文                             146.5k/1M 14.7%│
+│ 上下文缓存命中率 [Cache]      (会话总计 88.5%)    97.3%│
+├────────────────────────────────────────────────────────┤
+│ Gemini 模型                                            │
+│ 周额度                  Resets in 4d 7h        92% left│
+│ 5h limit                Resets in 3h 43m       98% left│
+├────────────────────────────────────────────────────────┤
+│ Token 活动                             每天  每周  累计总量 │
+│ ■■■■■■■■■■■■■■■■■■■■■■■■■                              │
+│ ■■■■■■■■■■■■■■■■■■■■■■■■■                              │
+│ ■■■■■■■■■■■■■■■■■■■■■■■■■                              │
+│ 6月      7月      8月      9月      10月     11月      │
+├────────────────────────────────────────────────────────┤
+│ 近期消耗                                新增 / 总吞吐 (命中)│
+│ 5小时已消耗           338.6万 / 3290.6万 (90%) (273次) │
+│ 本周已消耗             2011.2万 / 2.97亿 (94%) (2422次)│
+│ 历史累计总耗           7370.9万 / 11.13亿 (94%) (51会话)│
+└────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🚀 极速安装 / Quick Start
+
+### 🪟 Windows (PowerShell)
+以普通用户身份打开 PowerShell，执行一键安装脚本（自动配置开机静默后台常驻）：
+```powershell
+irm https://raw.githubusercontent.com/malie2f/antigravity-tokens-hud/main/install.ps1 | iex
+```
+
+### 🍎 macOS / 🐧 Linux (Bash)
+打开终端执行：
+```bash
+curl -fsSL https://raw.githubusercontent.com/malie2f/antigravity-tokens-hud/main/install.sh | bash
+```
+
+### 📦 手动安装 / 本地开发
+```bash
+# 1. 克隆代码仓库
+git clone https://github.com/malie2f/antigravity-tokens-hud.git
+cd antigravity-tokens-hud
+
+# 2. 运行后台守护进程
+node index.js
+```
+
+---
+
+## 🛠️ 工作原理 / How It Works
+
+```mermaid
+flowchart LR
+    A[Antigravity IDE] -->|监听 DevToolsActivePort| B(Node.js 守护进程 index.js)
+    C[(本地 SQLite 会话库)] -->|Protobuf 反序列化| D(Python 分析引擎 token_stats.py)
+    D -->|纳秒级缓存与增量聚合| B
+    B -->|CDP 轻量原地数据推送| E[嵌入式前端 client_widget.js]
+    E -->|DOM 文本/SVG环增量刷新| A
+```
+
+1. **自动 DevTools 端口探测**：通过监听用户数据目录下的 `DevToolsActivePort`，自动定位 Antigravity 渲染进程 WebSocket。
+2. **底层 SQLite 增量聚合**：通过 Python 反序列化 `steps` 表与 `gen_metadata` 表中的原生 Protobuf 数据（`exa.cortex_pb.CortexStepGeneratorMetadata`），严格根据 `stepIndices` 映射时间戳，精准提取提示词、生成输出、深度思考以及缓存读写量。
+3. **原地无损数据推送（In-Place DOM Push）**：前端暴露 `window.__AGY_HUD_PUSH__(data)` 钩子，后台每隔 1.5 秒更新时**仅定向更新数字节点与 SVG 进度偏移，绝不重置弹窗状态**，确保弹窗稳定常驻打开。
+
+---
+
+## ⚙️ 环境依赖 / Prerequisites
+
+* **Node.js**：`v18.0.0` 或更高版本（Node 22+ 原生支持 WebSocket，低版本支持自动降级 `ws`）
+* **Python**：`3.9` 或更高版本（内置标准库 `sqlite3`、`json`、`datetime`，无需安装额外第三方 pip 包）
+* **Google Antigravity**：支持 Antigravity 2.0 及更高版本
+
+---
+
+## 🗑️ 卸载指南 / Uninstallation
+
+如果您需要完全移除本插件：
+
+* **Windows**：运行 `~/.antigravity-tokens-hud/uninstall.ps1`，或执行：
+  ```powershell
+  & "$env:USERPROFILE\.antigravity-tokens-hud\uninstall.ps1"
+  ```
+* **macOS / Linux**：运行：
+  ```bash
+  bash ~/.antigravity-tokens-hud/uninstall.sh
+  ```
+
+---
+
+## 📄 开源许可证 / License
+
+本项目基于 [MIT License](LICENSE) 许可协议开源。
+欢迎提交 Issue 与 Pull Request 共同完善！
