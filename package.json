@@ -1,6 +1,6 @@
 {
   "name": "antigravity-tokens-hud",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Real-time token speed, context caching hit rate, and activity heatmap HUD for Google Antigravity 2.0",
   "main": "index.js",
   "bin": {
@@ -19,8 +19,9 @@
     "gemini-4",
     "tokens",
     "tps",
+    "context-window",
     "context-caching",
-    "quota",
+    "heatmap",
     "hud",
     "devtools",
     "ai"

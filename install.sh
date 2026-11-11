@@ -33,11 +33,14 @@ echo "✅ Python:  $(command -v $PYTHON_BIN) ($($PYTHON_BIN --version))"
 TARGET_DIR="$HOME/.antigravity-tokens-hud"
 mkdir -p "$TARGET_DIR"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/index.js" ] && [ "$SCRIPT_DIR" != "$TARGET_DIR" ]; then
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+fi
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/index.js" ] && [ "$SCRIPT_DIR" != "$TARGET_DIR" ]; then
     echo "📦 Installing files from local repository to $TARGET_DIR..."
     cp -R "$SCRIPT_DIR"/* "$TARGET_DIR/" 2>/dev/null || true
-elif [ ! -f "$TARGET_DIR/index.js" ]; then
+elif [ "$SCRIPT_DIR" != "$TARGET_DIR" ]; then
     echo "🌐 Downloading latest release from GitHub..."
     REPO_RAW="https://raw.githubusercontent.com/malie2f/antigravity-tokens-hud/main"
     for file in index.js client_widget.js token_stats.py package.json config.json uninstall.sh; do

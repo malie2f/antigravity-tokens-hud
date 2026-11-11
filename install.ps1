@@ -1,4 +1,4 @@
-# Antigravity Tokens HUD - Windows Installer
+﻿# Antigravity Tokens HUD - Windows Installer
 $ErrorActionPreference = "Stop"
 
 Write-Host ""
@@ -41,7 +41,7 @@ $ScriptDir = $PSScriptRoot
 if ($ScriptDir -and (Test-Path "$ScriptDir\index.js") -and ($ScriptDir -ne $TargetDir)) {
     Write-Host "📦 Installing files from local repository to $TargetDir..." -ForegroundColor Yellow
     Copy-Item "$ScriptDir\*" $TargetDir -Recurse -Force -Exclude "stats_cache.json*", "*.log", ".git"
-} elseif (-not (Test-Path "$TargetDir\index.js")) {
+} elseif (-not $ScriptDir -or ($ScriptDir -ne $TargetDir)) {
     Write-Host "🌐 Downloading latest release from GitHub..." -ForegroundColor Yellow
     $RepoRaw = "https://raw.githubusercontent.com/malie2f/antigravity-tokens-hud/main"
     $Files = @("index.js", "client_widget.js", "token_stats.py", "package.json", "config.json", "uninstall.ps1")
@@ -86,7 +86,7 @@ Write-Host ""
 Write-Host "📌 What to do next:" -ForegroundColor Cyan
 Write-Host "  1. Open or restart Google Antigravity." -ForegroundColor White
 Write-Host "  2. Look at the bottom toolbar beside the model selector:" -ForegroundColor White
-Write-Host "     [⚡ XX.X tok/s  XX.Xk/1M XX%  5h ◯]" -ForegroundColor Green
+Write-Host "     [⚡ XX.X tok/s  XX.Xk/1M XX% ◯]" -ForegroundColor Green
 Write-Host "  3. Click it to view the full popover with real-time speed, context caching hit rate, and 25-week activity heatmap!" -ForegroundColor White
 Write-Host ""
 Write-Host "🗑️ To uninstall anytime: Run $TargetDir\uninstall.ps1" -ForegroundColor Gray

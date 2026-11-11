@@ -4,44 +4,61 @@
 
   let isPopoverOpen = false;
   let activeActivityTab = "daily"; // "daily" | "weekly" | "total"
-  let cachedQuotas = null;
-  let lastQuotaFetch = 0;
   let currentMetrics = window.__AGY_DATA__ || null;
+
+  // Clean up any legacy global quota state from older versions
+  try {
+    delete window.__AGY_QUOTA_STATE__;
+  } catch (_) {}
+
+  function getDefaultMaxContext() {
+    try {
+      const trigger = document.querySelector('button[data-testid="model-selector-trigger"]');
+      const txt = (trigger?.textContent || "").toLowerCase();
+      if (txt.includes("claude")) {
+        return txt.includes("5.5") || txt.includes("opus 5") ? 1000000 : 200000;
+      }
+      if (txt.includes("gpt")) return 128000;
+    } catch (_) {}
+    return 1000000;
+  }
 
   function getActiveConvId() {
     try {
       if (window.__TSR_ROUTER__?.state) {
         const matches = window.__TSR_ROUTER__.state.matches || [];
         for (let i = matches.length - 1; i >= 0; i--) {
-          const cid = matches[i]?.params?.cascadeId;
-          if (cid) return cid;
+          const params = matches[i]?.params;
+          if (params?.newCascadeId) return params.newCascadeId;
+          if (params?.cascadeId) return params.cascadeId;
         }
-        const pathname = window.__TSR_ROUTER__.state.location?.pathname || "";
-        const parts = pathname.split("/");
-        const idx = parts.indexOf("c");
-        if (idx !== -1 && parts[idx + 1]) return parts[idx + 1];
-      }
+        const rPath = window.__TSR_ROUTER__.state.location?.pathname || "";
+        const rParts = rPath.split("/");
+        const rIdx = rParts.indexOf("c");
+        if (rIdx !== -1 && rParts[rIdx + 1]) return rParts[rIdx + 1];
 
-      const mainChat = document.querySelector('div:not([data-testid="conversation-row-sidebar"])[data-cascade-id]');
-      if (mainChat) {
-        const id = mainChat.getAttribute("data-cascade-id");
-        if (id) return id;
-      }
+        if (rPath.includes("/view/")) {
+          const viewChat = document.querySelector('[data-testid="conversation-view"][data-cascade-id]');
+          if (viewChat) return viewChat.getAttribute("data-cascade-id") || null;
+        }
 
-      const selRow = document.querySelector('[data-selected="true"][data-cascade-id]') || document.querySelector('[data-selected="true"]');
-      if (selRow) {
-        const id = selRow.getAttribute("data-cascade-id");
-        if (id) return id;
+        // On New Chat ("/") or non-conversation routes, strictly return null (never sidebar rows!)
+        return null;
       }
 
       const parts = window.location.pathname.split("/");
       const idx = parts.indexOf("c");
       if (idx !== -1 && parts[idx + 1]) return parts[idx + 1];
 
-      const anyChat = document.querySelector("[data-cascade-id]");
-      if (anyChat) {
-        const id = anyChat.getAttribute("data-cascade-id");
-        if (id) return id;
+      const mainChat = document.querySelector('[data-testid="conversation-view"][data-cascade-id]') ||
+        document.querySelector('div:not([data-testid="conversation-row-sidebar"])[data-cascade-id]');
+      if (mainChat) {
+        return mainChat.getAttribute("data-cascade-id") || null;
+      }
+
+      const selRow = document.querySelector('[data-testid="conversation-row-sidebar"][data-selected="true"][data-cascade-id]');
+      if (selRow) {
+        return selRow.getAttribute("data-cascade-id") || null;
       }
     } catch (_) {}
     return null;
@@ -69,81 +86,52 @@
     return n + "";
   }
 
-  function formatResetTime(seconds) {
-    if (!seconds) return "";
-    const sec = parseInt(seconds, 10);
-    if (isNaN(sec)) return "";
-    const diff = sec - Math.floor(Date.now() / 1000);
-    if (diff <= 0) return "now";
-    const days = Math.floor(diff / 86400);
-    const hours = Math.floor((diff % 86400) / 3600);
-    const mins = Math.floor((diff % 3600) / 60);
-    if (days > 0) return `${days}d ${hours}h`;
-    if (hours > 0) return `${hours}h ${mins}m`;
-    return `${mins}m`;
+  function getContextColor(pct) {
+    if (pct >= 85) return "#f87171";
+    if (pct >= 60) return "#fbbf24";
+    return "#4ade80";
   }
 
-  function renderCircleRing(pct, size = 18, radius = 7, strokeWidth = 2.2) {
+  function renderCircleRing(pct, size = 14, radius = 5.2, strokeWidth = 1.9) {
+    const safePct = Number.isFinite(pct) ? pct : 0;
+    const visualPct = safePct <= 0 ? 0 : Math.min(100, Math.max(3, safePct));
     const circumference = 2 * Math.PI * radius;
-    const offset = circumference - (Math.min(100, Math.max(0, pct)) / 100) * circumference;
+    const offset = circumference - (visualPct / 100) * circumference;
+    const strokeColor = getContextColor(safePct);
     return `
       <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" style="transform: rotate(-90deg); flex-shrink: 0; display: block;">
-        <circle cx="${size/2}" cy="${size/2}" r="${radius}" fill="none" stroke="rgba(255, 255, 255, 0.12)" stroke-width="${strokeWidth}" />
-        <circle cx="${size/2}" cy="${size/2}" r="${radius}" fill="none" stroke="#4ade80" stroke-width="${strokeWidth}"
-          stroke-dasharray="${circumference}" stroke-dashoffset="${offset}" stroke-linecap="round" />
+        <circle cx="${size/2}" cy="${size/2}" r="${radius}" fill="none" stroke="rgba(255, 255, 255, 0.14)" stroke-width="${strokeWidth}" />
+        ${visualPct > 0 ? `<circle cx="${size/2}" cy="${size/2}" r="${radius}" fill="none" stroke="${strokeColor}" stroke-width="${strokeWidth}"
+          stroke-dasharray="${circumference}" stroke-dashoffset="${offset}" stroke-linecap="round" />` : ""}
       </svg>
     `;
   }
 
-  async function fetchOfficialQuotas() {
-    try {
-      const btn = document.querySelector("button");
-      if (!btn) return null;
-      const fk = Object.keys(btn).find(k => k.startsWith("__reactFiber"));
-      if (!fk) return null;
-      let cur = btn[fk];
-      let client = null;
-      while (cur) {
-        if (cur.memoizedProps?.value?.retrieveUserQuotaSummary) {
-          client = cur.memoizedProps.value;
-          break;
-        }
-        cur = cur.return;
-      }
-      if (!client) return null;
-      const res = await Promise.race([
-        client.retrieveUserQuotaSummary({}),
-        new Promise(r => setTimeout(() => r(null), 2000))
-      ]);
-      return res?.response?.groups || null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  async function getQuotas() {
-    const now = Date.now();
-    if (!cachedQuotas || now - lastQuotaFetch > 4000) {
-      lastQuotaFetch = now;
-      const q = await fetchOfficialQuotas();
-      if (q) cachedQuotas = q;
-    }
-    return cachedQuotas;
-  }
-
   function getEffectiveSession(data) {
-    if (!data) return { context_size: 0, max_context: 1000000, context_percent: 0, cache_hit_percent: 0 };
+    const emptySession = {
+      context_size: 0,
+      max_context: getDefaultMaxContext(),
+      context_percent: 0,
+      cache_hit_percent: 0,
+      session_cache_hit_percent: 0,
+      speed_tps: 0,
+      avg_tps: 0,
+      peak_tps: 0,
+      duration_s: 0,
+      ttft_s: 0,
+      stream_s: 0,
+      output_tokens: 0,
+      total_turns: 0,
+      is_empty_active: true,
+    };
+    if (!data) return emptySession;
     const activeId = getActiveConvId();
-    if (activeId && data.sessions && data.sessions[activeId]) {
+    // Strict session isolation: New Chat (activeId === null) or 0-turn chat MUST reset to 0!
+    if (!activeId) return emptySession;
+    if (data.sessions && data.sessions[activeId] && (data.sessions[activeId].total_turns || 0) > 0) {
       return data.sessions[activeId];
     }
-    if (activeId && data.current_session && data.current_session.session_id === activeId) {
-      return data.current_session;
-    }
-    if (data.current_session) {
-      return data.current_session;
-    }
-    return { context_size: 0, max_context: 1000000, context_percent: 0, cache_hit_percent: 0 };
+    return emptySession;
   }
 
   function getHeatmapColor(tokens) {
@@ -339,8 +327,8 @@
     }
   };
 
-  // Main UI Renderer
-  window.__AGY_RENDER__ = async function() {
+  // Main UI Renderer (100% pure local DOM rendering, zero internal RPCs)
+  window.__AGY_RENDER__ = function() {
     const data = currentMetrics || window.__AGY_DATA__;
     if (!data) return;
     currentMetrics = data;
@@ -365,6 +353,7 @@
     // Session Metrics
     const session = getEffectiveSession(data);
     const pct = (session.context_percent != null) ? session.context_percent : 0.0;
+    const ctxColor = getContextColor(pct);
     const ctxK = fmtContextNum(session.context_size || 0);
     const maxK = ((session.max_context || 256000) >= 1000000)
       ? "1M"
@@ -372,42 +361,19 @@
     const cacheHitPct = (session.cache_hit_percent != null) ? session.cache_hit_percent : 0.0;
     const sessCacheHitPct = (session.session_cache_hit_percent != null) ? session.session_cache_hit_percent : cacheHitPct;
 
-    // Speed metrics (prioritize active conversation session data)
-    const speedObj = data.speed || {};
-    const tps = session.speed_tps || speedObj.tps || 0;
-    const avgTps = session.avg_tps || speedObj.avg_tps || tps;
-    const peakTps = session.peak_tps || speedObj.peak_tps || tps;
-    const dur = session.duration_s || speedObj.duration_s || 0;
-    const ttft = session.ttft_s || speedObj.ttft_s || 0;
-    const sdur = session.stream_s || speedObj.stream_s || 0;
-    const outTok = session.output_tokens || speedObj.output_tokens || 0;
+    // Speed metrics strictly scoped to this conversation ONLY (never leak another session's speed!)
+    const tps = session.speed_tps || 0;
+    const avgTps = session.avg_tps || 0;
+    const peakTps = session.peak_tps || 0;
+    const dur = session.duration_s || 0;
+    const ttft = session.ttft_s || 0;
+    const sdur = session.stream_s || 0;
+    const outTok = session.output_tokens || 0;
     const totalTurns = session.total_turns || 0;
 
     const u5h = data.usage_5h || {};
     const uWeekly = data.usage_weekly || {};
     const uHist = data.usage_historical || {};
-
-    // Quotas
-    const quotaGroups = await getQuotas();
-    let fiveHourPct = 100;
-    let fiveHourReset = "4h 18m";
-    let weeklyPct = 93;
-    let weeklyReset = "4d 19h";
-
-    if (quotaGroups && quotaGroups.length > 0) {
-      const geminiGroup = quotaGroups.find(g => g.displayName?.includes("Gemini")) || quotaGroups[0];
-      const hBucket = geminiGroup?.buckets?.find(b => b.window === "5h" || b.bucketId?.includes("5h"));
-      const wBucket = geminiGroup?.buckets?.find(b => b.window === "weekly" || b.bucketId?.includes("weekly"));
-
-      if (hBucket?.remaining?.value != null) {
-        fiveHourPct = Math.round(hBucket.remaining.value * 100);
-        fiveHourReset = formatResetTime(hBucket.resetTime?.seconds) || fiveHourReset;
-      }
-      if (wBucket?.remaining?.value != null) {
-        weeklyPct = Math.round(wBucket.remaining.value * 100);
-        weeklyReset = formatResetTime(wBucket.resetTime?.seconds) || weeklyReset;
-      }
-    }
 
     // Native Toolbar Button (Flush ghost button, no soft-edge bubble)
     let btn = document.getElementById("antigravity-token-btn");
@@ -459,23 +425,20 @@
       renderPopover();
     };
 
-    // Display primary speed: recent real speed, or session avg speed
-    const displaySpeed = tps > 0 ? `${tps} tok/s` : (avgTps > 0 ? `${avgTps} tok/s` : "就绪");
+    // Display primary speed: recent real speed, session avg speed, or 0.0 tok/s on new/empty session
+    const displaySpeed = tps > 0 ? `${tps} tok/s` : (avgTps > 0 ? `${avgTps} tok/s` : "0.0 tok/s");
 
     btn.innerHTML = `
       <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="color: #8ab4f8; flex-shrink: 0;">
         <path d="M7 2v11h3v9l7-12h-4l4-8z"/>
       </svg>
       <span id="agy-btn-speed" style="font-weight: 500; color: #8ab4f8; letter-spacing: -0.1px;">${displaySpeed}</span>
-      <span id="agy-btn-ctx" style="color: #e3e3e3; font-weight: 500; margin: 0 4px;">
+      <span id="agy-btn-ctx" style="display: inline-flex; align-items: center; gap: 4px; color: #e3e3e3; font-weight: 500; margin-left: 3px;">
         <span id="agy-btn-ctx-num">${ctxK}/${maxK}</span>
-        <span id="agy-btn-ctx-pct" style="color: #4ade80; font-weight: 600; margin-left: 3px;">${pct.toFixed(1)}%</span>
+        <span id="agy-btn-ctx-pct" style="color: ${ctxColor}; font-weight: 600;">${pct.toFixed(1)}%</span>
+        <span id="agy-btn-ring" style="display: inline-flex; align-items: center; margin-left: 1px;">${renderCircleRing(pct, 14, 5.2, 1.9)}</span>
       </span>
-      <div style="display: flex; align-items: center; gap: 4px; margin-left: 2px;">
-        <span style="color: #9aa0a6; font-size: 11px;">5h</span>
-        <span id="agy-btn-ring">${renderCircleRing(fiveHourPct, 13, 4.5, 1.8)}</span>
-      </div>
-      <svg id="agy-btn-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #9aa0a6; margin-left: 2px; transition: transform 0.2s ease; transform: ${isPopoverOpen ? 'rotate(180deg)' : 'rotate(0deg)'};">
+      <svg id="agy-btn-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: #9aa0a6; margin-left: 1px; transition: transform 0.2s ease; transform: ${isPopoverOpen ? 'rotate(180deg)' : 'rotate(0deg)'};">
         <polyline points="6 9 12 15 18 9"></polyline>
       </svg>
       <div id="antigravity-token-popover"></div>
@@ -530,7 +493,7 @@
                 onclick="window.__AGY_CLOSE_POPOVER__()">✕ 关闭</span>
         </div>
 
-        <!-- Section 1: 实时性能 (Accurate Speed & Cache Hit Rate) -->
+        <!-- Section 1: 实时性能 (Accurate Speed, Context Ring & Cache Hit Rate) -->
         <div style="margin-bottom: 14px;">
           <div style="font-size: 13.5px; font-weight: 600; color: #ffffff; margin-bottom: 9px; letter-spacing: -0.2px;">实时性能</div>
           
@@ -539,11 +502,11 @@
             <div>
               <div style="font-size: 12.5px; color: #bcbdc6;">生成速度</div>
               <div id="agy-pop-dur" style="font-size: 10.5px; color: #80868b; margin-top: 1px;">
-                ${dur > 0 ? `最近: ${outTok} tok · ${dur}s (思考 ${ttft}s · 输出 ${sdur}s)` : "就绪"}
+                ${dur > 0 ? `最近: ${outTok} tok · ${dur}s (首字 ${ttft}s · 流式 ${sdur}s)` : "暂无生成记录"}
               </div>
             </div>
             <div style="text-align: right;">
-              <span id="agy-pop-speed" style="font-size: 13px; font-weight: 600; color: #8ab4f8;">${tps > 0 ? `${tps} tok/s` : "就绪"}</span>
+              <span id="agy-pop-speed" style="font-size: 13px; font-weight: 600; color: #8ab4f8;">${tps > 0 ? `${tps} tok/s` : "0.0 tok/s"}</span>
             </div>
           </div>
 
@@ -551,21 +514,22 @@
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px;">
             <span style="font-size: 12px; color: #9aa0a6;">会话平均速度</span>
             <div style="text-align: right;">
-              <span id="agy-pop-avg-speed" style="font-size: 12.5px; font-weight: 500; color: #e3e3e3;">${avgTps > 0 ? `${avgTps} tok/s` : "就绪"}</span>
-              <span id="agy-pop-avg-sub" style="font-size: 10px; color: #80868b; margin-left: 4px;">(${totalTurns}轮 · 峰值 ${peakTps})</span>
+              <span id="agy-pop-avg-speed" style="font-size: 12.5px; font-weight: 500; color: #e3e3e3;">${avgTps > 0 ? `${avgTps} tok/s` : "0.0 tok/s"}</span>
+              <span id="agy-pop-avg-sub" style="font-size: 10px; color: #80868b; margin-left: 4px;">(${totalTurns}轮 · 峰值 ${peakTps > 0 ? peakTps : "0.0"})</span>
             </div>
           </div>
 
-          <!-- Context Window Usage: 已用/总共 百分之 (无多余括号与分割号) -->
+          <!-- Context Window Usage: 已用/总共 百分之 + 进度圆圈 -->
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px;">
             <span style="font-size: 12.5px; color: #bcbdc6;">当前会话上下文</span>
-            <div style="text-align: right; font-size: 12.5px;">
+            <div style="display: flex; align-items: center; gap: 6px; font-size: 12.5px;">
               <span id="agy-pop-ctx-num" style="color: #e3e3e3; font-weight: 500;">${ctxK}/${maxK}</span>
-              <span id="agy-pop-ctx-pct" style="color: #4ade80; font-weight: 600; margin-left: 6px;">${pct.toFixed(1)}%</span>
+              <span id="agy-pop-ctx-pct" style="color: ${ctxColor}; font-weight: 600;">${pct.toFixed(1)}%</span>
+              <span id="agy-pop-ctx-ring" style="display: inline-flex; align-items: center;">${renderCircleRing(pct, 15, 5.5, 2.0)}</span>
             </div>
           </div>
 
-          <!-- Cache Hit Rate (User Requested Feature) -->
+          <!-- Cache Hit Rate -->
           <div style="display: flex; justify-content: space-between; align-items: center;">
             <div style="display: flex; align-items: center; gap: 4px;">
               <span style="font-size: 12px; color: #bcbdc6;">上下文缓存命中率</span>
@@ -580,38 +544,7 @@
 
         <div style="height: 1px; background: rgba(255, 255, 255, 0.08); margin: 12px 0;"></div>
 
-        <!-- Section 2: Gemini 官方额度 -->
-        <div style="margin-bottom: 14px;">
-          <div style="font-size: 13.5px; font-weight: 600; color: #ffffff; margin-bottom: 10px; letter-spacing: -0.2px;">Gemini 模型</div>
-
-          <!-- 周额度 -->
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-            <span style="font-size: 12.5px; color: #bcbdc6;">周额度</span>
-            <div style="display: flex; align-items: center; gap: 8px;">
-              <div style="text-align: right;">
-                <div id="agy-pop-w-pct" style="font-size: 12.5px; font-weight: 600; color: #ffffff;">${weeklyPct}% left</div>
-                <div id="agy-pop-w-rst" style="font-size: 10.5px; color: #9aa0a6;">Resets in ${weeklyReset}</div>
-              </div>
-              <span id="agy-pop-w-ring">${renderCircleRing(weeklyPct, 18, 7, 2.2)}</span>
-            </div>
-          </div>
-
-          <!-- 5h limit -->
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span style="font-size: 12.5px; color: #bcbdc6;">5h limit</span>
-            <div style="display: flex; align-items: center; gap: 8px;">
-              <div style="text-align: right;">
-                <div id="agy-pop-h-pct" style="font-size: 12.5px; font-weight: 600; color: #ffffff;">${fiveHourPct}% left</div>
-                <div id="agy-pop-h-rst" style="font-size: 10.5px; color: #9aa0a6;">Resets in ${fiveHourReset}</div>
-              </div>
-              <span id="agy-pop-h-ring">${renderCircleRing(fiveHourPct, 18, 7, 2.2)}</span>
-            </div>
-          </div>
-        </div>
-
-        <div style="height: 1px; background: rgba(255, 255, 255, 0.08); margin: 12px 0;"></div>
-
-        <!-- Section 3: Token 活动 (Native Antigravity Heatmap - Compact & Dense) -->
+        <!-- Section 2: Token 活动 (Native Antigravity Heatmap - Compact & Dense) -->
         <div style="margin-bottom: 14px;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
             <div style="font-size: 13.5px; font-weight: 600; color: #ffffff; letter-spacing: -0.2px;">Token 活动</div>
@@ -632,7 +565,7 @@
 
         <div style="height: 1px; background: rgba(255, 255, 255, 0.08); margin: 12px 0;"></div>
 
-        <!-- Section 4: 消耗统计 (新增消耗 / 含缓存总吞吐) -->
+        <!-- Section 3: 消耗统计 (新增消耗 / 含缓存总吞吐) -->
         <div>
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px;">
             <span style="font-size: 13.5px; font-weight: 600; color: #ffffff; letter-spacing: -0.2px;">近期消耗</span>
@@ -678,7 +611,7 @@
 
   // Lightweight in-place data push from daemon
   // Updates values live without re-rendering or resetting DOM/popover state!
-  window.__AGY_HUD_PUSH__ = async function(newData) {
+  window.__AGY_HUD_PUSH__ = function(newData) {
     if (!newData) return false;
     currentMetrics = newData;
 
@@ -691,6 +624,7 @@
 
     const session = getEffectiveSession(newData);
     const pct = (session.context_percent != null) ? session.context_percent : 0.0;
+    const ctxColor = getContextColor(pct);
     const ctxK = fmtContextNum(session.context_size || 0);
     const maxK = ((session.max_context || 256000) >= 1000000)
       ? "1M"
@@ -698,69 +632,55 @@
     const cacheHitPct = (session.cache_hit_percent != null) ? session.cache_hit_percent : 0.0;
     const sessCacheHitPct = (session.session_cache_hit_percent != null) ? session.session_cache_hit_percent : cacheHitPct;
 
-    const speedObj = newData.speed || {};
-    const tps = session.speed_tps || speedObj.tps || 0;
-    const avgTps = session.avg_tps || speedObj.avg_tps || tps;
-    const peakTps = session.peak_tps || speedObj.peak_tps || tps;
-    const dur = session.duration_s || speedObj.duration_s || 0;
-    const ttft = session.ttft_s || speedObj.ttft_s || 0;
-    const sdur = session.stream_s || speedObj.stream_s || 0;
-    const outTok = session.output_tokens || speedObj.output_tokens || 0;
+    const tps = session.speed_tps || 0;
+    const avgTps = session.avg_tps || 0;
+    const peakTps = session.peak_tps || 0;
+    const dur = session.duration_s || 0;
+    const ttft = session.ttft_s || 0;
+    const sdur = session.stream_s || 0;
+    const outTok = session.output_tokens || 0;
     const totalTurns = session.total_turns || 0;
 
     // Update Toolbar Button
     const speedEl = document.getElementById("agy-btn-speed");
-    if (speedEl) speedEl.textContent = tps > 0 ? `${tps} tok/s` : (avgTps > 0 ? `${avgTps} tok/s` : "就绪");
+    if (speedEl) speedEl.textContent = tps > 0 ? `${tps} tok/s` : (avgTps > 0 ? `${avgTps} tok/s` : "0.0 tok/s");
 
     const btnCtxNum = document.getElementById("agy-btn-ctx-num");
     if (btnCtxNum) btnCtxNum.textContent = `${ctxK}/${maxK}`;
     const btnCtxPct = document.getElementById("agy-btn-ctx-pct");
-    if (btnCtxPct) btnCtxPct.textContent = `${pct.toFixed(1)}%`;
-
-    // Quotas
-    const quotaGroups = await getQuotas();
-    let fiveHourPct = 100;
-    let fiveHourReset = "4h 18m";
-    let weeklyPct = 93;
-    let weeklyReset = "4d 19h";
-
-    if (quotaGroups && quotaGroups.length > 0) {
-      const geminiGroup = quotaGroups.find(g => g.displayName?.includes("Gemini")) || quotaGroups[0];
-      const hBucket = geminiGroup?.buckets?.find(b => b.window === "5h" || b.bucketId?.includes("5h"));
-      const wBucket = geminiGroup?.buckets?.find(b => b.window === "weekly" || b.bucketId?.includes("weekly"));
-
-      if (hBucket?.remaining?.value != null) {
-        fiveHourPct = Math.round(hBucket.remaining.value * 100);
-        fiveHourReset = formatResetTime(hBucket.resetTime?.seconds) || fiveHourReset;
-      }
-      if (wBucket?.remaining?.value != null) {
-        weeklyPct = Math.round(wBucket.remaining.value * 100);
-        weeklyReset = formatResetTime(wBucket.resetTime?.seconds) || weeklyReset;
-      }
+    if (btnCtxPct) {
+      btnCtxPct.textContent = `${pct.toFixed(1)}%`;
+      btnCtxPct.style.color = ctxColor;
     }
 
     const ringEl = document.getElementById("agy-btn-ring");
-    if (ringEl) ringEl.innerHTML = renderCircleRing(fiveHourPct, 13, 4.5, 1.8);
+    if (ringEl) ringEl.innerHTML = renderCircleRing(pct, 14, 5.2, 1.9);
 
     // If popover is open, update elements in place without disturbing user interaction!
     if (isPopoverOpen) {
       const popSpeed = document.getElementById("agy-pop-speed");
-      if (popSpeed) popSpeed.textContent = tps > 0 ? `${tps} tok/s` : "就绪";
+      if (popSpeed) popSpeed.textContent = tps > 0 ? `${tps} tok/s` : "0.0 tok/s";
 
       const popDur = document.getElementById("agy-pop-dur");
-      if (popDur) popDur.textContent = dur > 0 ? `最近: ${outTok} tok · ${dur}s (思考 ${ttft}s · 输出 ${sdur}s)` : "就绪";
+      if (popDur) popDur.textContent = dur > 0 ? `最近: ${outTok} tok · ${dur}s (首字 ${ttft}s · 流式 ${sdur}s)` : "暂无生成记录";
 
       const popAvgSpeed = document.getElementById("agy-pop-avg-speed");
-      if (popAvgSpeed) popAvgSpeed.textContent = avgTps > 0 ? `${avgTps} tok/s` : "就绪";
+      if (popAvgSpeed) popAvgSpeed.textContent = avgTps > 0 ? `${avgTps} tok/s` : "0.0 tok/s";
 
       const popAvgSub = document.getElementById("agy-pop-avg-sub");
-      if (popAvgSub) popAvgSub.textContent = `(${totalTurns}轮 · 峰值 ${peakTps})`;
+      if (popAvgSub) popAvgSub.textContent = `(${totalTurns}轮 · 峰值 ${peakTps > 0 ? peakTps : "0.0"})`;
 
       const popCtxNum = document.getElementById("agy-pop-ctx-num");
       if (popCtxNum) popCtxNum.textContent = `${ctxK}/${maxK}`;
 
       const popCtxPct = document.getElementById("agy-pop-ctx-pct");
-      if (popCtxPct) popCtxPct.textContent = `${pct.toFixed(1)}%`;
+      if (popCtxPct) {
+        popCtxPct.textContent = `${pct.toFixed(1)}%`;
+        popCtxPct.style.color = ctxColor;
+      }
+
+      const popCtxRing = document.getElementById("agy-pop-ctx-ring");
+      if (popCtxRing) popCtxRing.innerHTML = renderCircleRing(pct, 15, 5.5, 2.0);
 
       const popCacheHit = document.getElementById("agy-pop-cache-hit");
       if (popCacheHit) popCacheHit.textContent = `${cacheHitPct.toFixed(1)}%`;
@@ -768,19 +688,8 @@
       const popCacheSub = document.getElementById("agy-pop-cache-sub");
       if (popCacheSub) popCacheSub.textContent = `(会话总计 ${sessCacheHitPct.toFixed(1)}%)`;
 
-      const popWPct = document.getElementById("agy-pop-w-pct");
-      if (popWPct) popWPct.textContent = `${weeklyPct}% left`;
-      const popWRst = document.getElementById("agy-pop-w-rst");
-      if (popWRst) popWRst.textContent = `Resets in ${weeklyReset}`;
-      const popWRing = document.getElementById("agy-pop-w-ring");
-      if (popWRing) popWRing.innerHTML = renderCircleRing(weeklyPct, 18, 7, 2.2);
-
-      const popHPct = document.getElementById("agy-pop-h-pct");
-      if (popHPct) popHPct.textContent = `${fiveHourPct}% left`;
-      const popHRst = document.getElementById("agy-pop-h-rst");
-      if (popHRst) popHRst.textContent = `Resets in ${fiveHourReset}`;
-      const popHRing = document.getElementById("agy-pop-h-ring");
-      if (popHRing) popHRing.innerHTML = renderCircleRing(fiveHourPct, 18, 7, 2.2);
+      const actContainer = document.getElementById("agy-activity-tab-content");
+      if (actContainer) actContainer.innerHTML = renderActivityContent(newData);
 
       const popU5hNew = document.getElementById("agy-pop-u5h-new");
       if (popU5hNew) popU5hNew.textContent = fmtTok(newData.usage_5h?.new_tokens || 0);
@@ -813,11 +722,9 @@
     return true;
   };
 
-  // Global listeners (registered only once)
+  // Document click/ESC listeners (registered only once)
   if (!window.__AGY_LISTENER_SET__) {
     window.__AGY_LISTENER_SET__ = true;
-    let lastId = null;
-    let lastPath = window.location.pathname;
 
     document.addEventListener("click", (e) => {
       const btn = document.getElementById("antigravity-token-btn");
@@ -831,25 +738,40 @@
         window.__AGY_CLOSE_POPOVER__();
       }
     });
+  }
 
-    if (window.__TSR_ROUTER__ && typeof window.__TSR_ROUTER__.subscribe === "function") {
-      try {
-        window.__TSR_ROUTER__.subscribe(() => {
-          if (window.__AGY_RENDER__) window.__AGY_RENDER__();
-        });
-      } catch (_) {}
+  // Hot-reloadable router & navigation watcher (always uses latest getActiveConvId!)
+  try {
+    if (typeof window.__AGY_UNSUB_ROUTER__ === "function") {
+      window.__AGY_UNSUB_ROUTER__();
+      window.__AGY_UNSUB_ROUTER__ = null;
+    }
+    if (window.__AGY_NAV_TIMER__) {
+      clearInterval(window.__AGY_NAV_TIMER__);
+      window.__AGY_NAV_TIMER__ = null;
     }
 
-    setInterval(() => {
-      const currentId = getActiveConvId();
-      const currentPath = window.location.pathname;
-      if (currentId !== lastId || currentPath !== lastPath) {
-        lastId = currentId;
-        lastPath = currentPath;
+    let lastNavSig = "";
+    const checkNavChange = () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      const cid = getActiveConvId() || "__NEW__";
+      const rPath = window.__TSR_ROUTER__?.state?.location?.pathname || window.location.pathname;
+      const mMax = getDefaultMaxContext();
+      const sig = `${cid}|${rPath}|${mMax}`;
+      if (sig !== lastNavSig) {
+        lastNavSig = sig;
         if (window.__AGY_RENDER__) window.__AGY_RENDER__();
       }
-    }, 150);
-  }
+    };
+
+    if (window.__TSR_ROUTER__?.__store && typeof window.__TSR_ROUTER__.__store.subscribe === "function") {
+      window.__AGY_UNSUB_ROUTER__ = window.__TSR_ROUTER__.__store.subscribe(checkNavChange);
+    } else if (window.__TSR_ROUTER__ && typeof window.__TSR_ROUTER__.subscribe === "function") {
+      window.__AGY_UNSUB_ROUTER__ = window.__TSR_ROUTER__.subscribe("onResolved", checkNavChange);
+    }
+
+    window.__AGY_NAV_TIMER__ = setInterval(checkNavChange, 400);
+  } catch (_) {}
 
   if (window.__AGY_RENDER__) {
     window.__AGY_RENDER__();

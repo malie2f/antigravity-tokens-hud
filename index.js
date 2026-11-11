@@ -30,11 +30,20 @@ function getDevToolsFilePath() {
 }
 
 const DEVTOOLS_FILE = getDevToolsFilePath();
+const CONVERSATIONS_DIR = path.join(os.homedir(), ".gemini/antigravity/conversations");
 const TOKEN_STATS_SCRIPT = path.join(__dirname, "token_stats.py");
 const CLIENT_SCRIPT_PATH = fs.existsSync(path.join(__dirname, "client_widget.js"))
   ? path.join(__dirname, "client_widget.js")
   : path.join(__dirname, "client_widget_injector.js");
 const CONFIG_FILE = path.join(__dirname, "config.json");
+
+const WSImpl = globalThis.WebSocket || (() => {
+  try {
+    return require("ws");
+  } catch (_) {
+    return null;
+  }
+})();
 
 let cdpMessageId = 1;
 function nextCdpId() {
@@ -42,13 +51,39 @@ function nextCdpId() {
   return cdpMessageId;
 }
 
-// Map of pageId -> { ws, injectedVersion: string | null, pendingEvalId: number | null, url: string }
+// Map of pageId -> { ws, injectedVersion, lastPushedSig, lastPingAt, checkId, pageId, url }
 const activePages = new Map();
 let currentPort = null;
 let isUpdating = false;
 
 let cachedClientScript = "";
 let cachedScriptVersion = "";
+let cachedStatsPayload = "";
+let lastConvSig = "";
+
+function getConversationsSignature() {
+  try {
+    if (!fs.existsSync(CONVERSATIONS_DIR)) return "empty";
+    const files = fs.readdirSync(CONVERSATIONS_DIR);
+    let count = 0;
+    let maxMtime = 0;
+    let totalSize = 0;
+    for (const f of files) {
+      if (f.endsWith(".db") || f.endsWith(".db-wal")) {
+        try {
+          const st = fs.statSync(path.join(CONVERSATIONS_DIR, f));
+          count++;
+          totalSize += st.size;
+          if (st.mtimeMs > maxMtime) maxMtime = st.mtimeMs;
+        } catch (_) {}
+      }
+    }
+    const dayKey = new Date().toISOString().slice(0, 10);
+    return `${dayKey}:${count}:${totalSize}:${Math.floor(maxMtime)}`;
+  } catch (_) {
+    return "";
+  }
+}
 
 function loadClientScriptIfNeeded() {
   try {
@@ -122,6 +157,10 @@ function fetchTokenStats() {
 
 function connectPageWebSocket(page) {
   return new Promise((resolve) => {
+    if (!WSImpl) {
+      resolve(null);
+      return;
+    }
     let resolved = false;
     let ws = null;
     const timer = setTimeout(() => {
@@ -135,8 +174,16 @@ function connectPageWebSocket(page) {
     }, 2000);
 
     try {
-      ws = new WebSocket(page.webSocketDebuggerUrl);
-      const entry = { ws, injectedVersion: null, checkId: null, pageId: page.id, url: page.url };
+      ws = new WSImpl(page.webSocketDebuggerUrl);
+      const entry = {
+        ws,
+        injectedVersion: null,
+        lastPushedSig: null,
+        lastPingAt: 0,
+        checkId: null,
+        pageId: page.id,
+        url: page.url,
+      };
 
       ws.onopen = () => {
         if (!resolved) {
@@ -147,22 +194,25 @@ function connectPageWebSocket(page) {
         }
       };
 
-      ws.onmessage = (msg) => {
+      ws.onmessage = (rawEvt) => {
         try {
-          const data = JSON.parse(msg.data);
+          const rawStr = typeof rawEvt === "string" ? rawEvt : (rawEvt?.data ?? rawEvt?.toString?.() ?? "");
+          const data = JSON.parse(rawStr);
           if (data.error) {
             const msgText = data.error.message || "";
             if (msgText.includes("execution context") || msgText.includes("detached") || msgText.includes("Target closed")) {
               entry.injectedVersion = null;
+              entry.lastPushedSig = null;
               try {
                 ws.close();
               } catch (_) {}
               activePages.delete(page.id);
             }
           } else if (data.id && data.id === entry.checkId) {
-            // If fast push returned false (page reloaded and lost window.__AGY_HUD_PUSH__), re-inject next tick
+            // If fast push or liveness ping returned false (page reloaded and lost widget), re-inject next tick
             if (data.result?.result?.value === false) {
               entry.injectedVersion = null;
+              entry.lastPushedSig = null;
             }
           }
         } catch (_) {}
@@ -228,9 +278,10 @@ async function updateLoop() {
       }
     }
 
+    const wsOpenConst = WSImpl?.OPEN ?? 1;
     for (const page of pages) {
       const existing = activePages.get(page.id);
-      if (!existing || existing.ws.readyState !== WebSocket.OPEN) {
+      if (!existing || existing.ws.readyState !== wsOpenConst) {
         if (existing) {
           try {
             existing.ws.close();
@@ -243,41 +294,66 @@ async function updateLoop() {
 
     if (activePages.size === 0) return;
 
-    const stats = await fetchTokenStats();
-    if (!stats) return;
+    // Only spawn python token_stats.py when local SQLite/WAL files actually changed!
+    const currentSig = getConversationsSignature();
+    if (!cachedStatsPayload || (currentSig && currentSig !== lastConvSig)) {
+      const stats = await fetchTokenStats();
+      if (stats) {
+        cachedStatsPayload = JSON.stringify(stats);
+        lastConvSig = currentSig;
+      }
+    }
+    if (!cachedStatsPayload) return;
 
     const { script: clientScript, version: scriptVersion } = loadClientScriptIfNeeded();
     if (!clientScript) return;
 
     const lang = getConfigLang();
-    const payload = JSON.stringify(stats);
+    const now = Date.now();
 
     for (const [, entry] of activePages) {
-      if (entry.ws.readyState !== WebSocket.OPEN) continue;
+      if (entry.ws.readyState !== wsOpenConst) continue;
 
-      const msgId = nextCdpId();
       let expression = "";
+      let isCheck = false;
 
       if (entry.injectedVersion !== scriptVersion) {
         // Full install / hot-upgrade of widget script
         expression = `
           window.__AGY_LANG__ = ${JSON.stringify(lang)};
-          window.__AGY_DATA__ = ${payload};
+          window.__AGY_DATA__ = ${cachedStatsPayload};
           window.__AGY_HUD_VERSION__ = ${JSON.stringify(scriptVersion)};
           ${clientScript}
           true;
         `;
         entry.injectedVersion = scriptVersion;
-        entry.checkId = null;
-      } else {
-        // Lightweight non-destructive data push (never resets UI state or recreates DOM!)
+        entry.lastPushedSig = lastConvSig;
+        entry.lastPingAt = now;
+      } else if (entry.lastPushedSig !== lastConvSig) {
+        // Data changed on disk -> lightweight in-place data push
         expression = `
           (window.__AGY_HUD_VERSION__ === ${JSON.stringify(scriptVersion)} && typeof window.__AGY_HUD_PUSH__ === "function")
-            ? (window.__AGY_HUD_PUSH__(${payload}), true)
+            ? (window.__AGY_HUD_PUSH__(${cachedStatsPayload}), true)
             : false
         `;
-        entry.checkId = msgId;
+        entry.lastPushedSig = lastConvSig;
+        entry.lastPingAt = now;
+        isCheck = true;
+      } else if (now - entry.lastPingAt >= 10000) {
+        // Idle liveness ping once every 10s (tiny 1-line check in case webview reloaded)
+        expression = `
+          window.__AGY_HUD_VERSION__ === ${JSON.stringify(scriptVersion)} &&
+          typeof window.__AGY_HUD_PUSH__ === "function" &&
+          (!!document.getElementById("antigravity-token-btn") || (window.__AGY_RENDER__ && (window.__AGY_RENDER__(), true)))
+        `;
+        entry.lastPingAt = now;
+        isCheck = true;
+      } else {
+        continue;
       }
+
+      const msgId = nextCdpId();
+      entry.checkId = isCheck ? msgId : null;
 
       entry.ws.send(
         JSON.stringify({
@@ -298,5 +374,5 @@ async function updateLoop() {
 }
 
 console.log("[Antigravity Tokens HUD] Daemon running. Monitoring Antigravity DevTools...");
-setInterval(updateLoop, 1500);
+setInterval(updateLoop, 2000);
 updateLoop();

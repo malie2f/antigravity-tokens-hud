@@ -10,7 +10,7 @@ from collections import defaultdict
 
 CONVERSATIONS_DIR = os.path.expanduser("~/.gemini/antigravity/conversations")
 CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stats_cache.json")
-CACHE_SCHEMA_VERSION = 5
+CACHE_SCHEMA_VERSION = 7
 
 
 def decode_varint(data, offset):
@@ -78,6 +78,25 @@ def get_db_signature(db_path):
         return ""
 
 
+def parse_proto_timestamp(raw):
+    d = {k: v for k, t, v in parse_proto(raw) if t == "varint"}
+    if not d:
+        return 0.0
+    return d.get(1, 0) + d.get(2, 0) / 1e9
+
+
+def extract_usage_dict(raw):
+    d = {k: v for k, t, v in parse_proto(raw) if t == "varint"}
+    p_tok = d.get(2, 0)
+    out_tok = d.get(3, 0)
+    c_tok = d.get(4, 0) + d.get(5, 0)
+    th_tok = d.get(9, 0)
+    tx_tok = d.get(10, 0)
+    if p_tok > 0 or c_tok > 0 or out_tok > 0:
+        return (p_tok, out_tok, c_tok, th_tok, tx_tok)
+    return None
+
+
 def parse_single_db(db_path, sess_id):
     records = []
     fallback_ts = 0
@@ -95,14 +114,28 @@ def parse_single_db(db_path, sess_id):
         c = conn.cursor()
 
         step_times = {}
+        step_details = {}
         try:
             c.execute("SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL")
-            for idx, meta in c.fetchall():
+            for s_idx, meta in c.fetchall():
+                t1 = 0.0
+                t6 = 0.0
+                t7 = 0.0
+                s_usage = None
                 for fn, wt, val in parse_proto(meta):
-                    if fn == 1 and wt == "bytes":
-                        for sfn, swt, sval in parse_proto(val):
-                            if sfn == 1 and swt == "varint":
-                                step_times[idx] = sval
+                    if wt == "bytes":
+                        if fn == 1:
+                            t1 = parse_proto_timestamp(val)
+                            if t1 > 0:
+                                step_times[s_idx] = int(t1)
+                        elif fn == 6:
+                            t6 = parse_proto_timestamp(val)
+                        elif fn == 7:
+                            t7 = parse_proto_timestamp(val)
+                        elif fn == 9:
+                            s_usage = extract_usage_dict(val)
+                if s_usage is not None or t1 > 0:
+                    step_details[s_idx] = (t1, t6, t7, s_usage)
         except Exception:
             pass
 
@@ -120,10 +153,14 @@ def parse_single_db(db_path, sess_id):
                             step_indices.append(val)
 
                 ts = 0
+                step_attempts = []
                 for s_idx in step_indices:
                     st_val = step_times.get(s_idx, 0)
                     if st_val > ts:
                         ts = st_val
+                    det = step_details.get(s_idx)
+                    if det and det[3] is not None:
+                        step_attempts.append(det)
                 if ts <= 0:
                     ts = step_times.get(idx, fallback_ts)
 
@@ -131,31 +168,29 @@ def parse_single_db(db_path, sess_id):
                     if fn == 1 and wt == "bytes":
                         ttft_s = 0.0
                         stream_s = 0.0
+                        retry_cnt = 0
                         model_name = ""
                         max_ctx = 1000000
                         est_ctx = 0
+                        compact_lim = 0
                         sub_fields = parse_proto(val)
 
+                        s4_entry = None
+                        s17_entries = []
+
                         for sfn, swt, sval in sub_fields:
-                            # sfn 19: model name (e.g. gemini-3.8-flash, gemini-4-argon, claude-3-5-sonnet)
+                            # sfn 19: model name (e.g. gemini-3.8-flash, gemini-4-carbon, claude-sonnet-4-6)
                             if sfn == 19 and swt == "bytes":
                                 model_name = sval.decode("utf-8", errors="ignore").lower()
+                            # sfn 14: retry count within this turn
+                            elif sfn == 14 and swt == "varint":
+                                retry_cnt = sval
                             # sfn 11: timeToFirstToken (google.protobuf.Duration)
                             elif sfn == 11 and swt == "bytes":
-                                dur_fields = {
-                                    k: v for k, t, v in parse_proto(sval) if t == "varint"
-                                }
-                                ttft_s = (
-                                    dur_fields.get(1, 0) + dur_fields.get(2, 0) / 1e9
-                                )
+                                ttft_s = parse_proto_timestamp(sval)
                             # sfn 12: streamingDuration (google.protobuf.Duration)
                             elif sfn == 12 and swt == "bytes":
-                                dur_fields = {
-                                    k: v for k, t, v in parse_proto(sval) if t == "varint"
-                                }
-                                stream_s = (
-                                    dur_fields.get(1, 0) + dur_fields.get(2, 0) / 1e9
-                                )
+                                stream_s = parse_proto_timestamp(sval)
                             # sfn 9: chatStartMetadata -> cfn 10: contextWindowMetadata
                             elif sfn == 9 and swt == "bytes":
                                 for cfn, cwt, cval in parse_proto(sval):
@@ -164,58 +199,58 @@ def parse_single_db(db_path, sess_id):
                                             k: v for k, t, v in parse_proto(cval) if t == "varint"
                                         }
                                         est_ctx = ctx_fields.get(1, 0)
+                                        compact_lim = ctx_fields.get(4, 0)
+                            # sfn 4: cumulative exa.codeium_common_pb.ModelUsageStats (sums retries)
+                            elif sfn == 4 and swt == "bytes" and s4_entry is None:
+                                s4_entry = extract_usage_dict(sval)
+                            # sfn 17: per-attempt generator call records
+                            elif sfn == 17 and swt == "bytes":
+                                for tfn, twt, tval in parse_proto(sval):
+                                    if tfn == 2 and twt == "bytes":
+                                        u = extract_usage_dict(tval)
+                                        if u:
+                                            s17_entries.append(u)
+                                            break
 
                         if "claude" in model_name:
-                            max_ctx = 200000
+                            max_ctx = 1000000 if ("opus-5" in model_name or compact_lim > 200000) else 200000
                         elif "gpt" in model_name:
                             max_ctx = 128000
                         else:
-                            max_ctx = 1000000  # Default 1M for Gemini Flash/Pro/Argon
+                            max_ctx = 1000000  # Default 1M for Gemini models
 
-                        duration_s = ttft_s + stream_s
+                        # Cumulative billed usage for 5h / weekly / historical / heatmap
+                        total_entry = s4_entry or (s17_entries[-1] if s17_entries else None)
+                        if not total_entry and step_attempts:
+                            total_entry = step_attempts[-1][3]
 
-                        # sfn 4: authoritative exa.codeium_common_pb.ModelUsageStats
-                        # tag 2: inputTokens, tag 3: outputTokens, tag 4: cacheWriteTokens,
-                        # tag 5: cacheReadTokens, tag 9: thinkingOutputTokens, tag 10: responseOutputTokens
-                        tok_entry = None
-                        for sfn, swt, sval in sub_fields:
-                            if sfn == 4 and swt == "bytes":
-                                d = {k: v for k, t, v in parse_proto(sval) if t == "varint"}
-                                p_tok = d.get(2, 0)
-                                out_tok = d.get(3, 0)
-                                cw_tok = d.get(4, 0)
-                                cr_tok = d.get(5, 0)
-                                c_tok = cw_tok + cr_tok
-                                th_tok = d.get(9, 0)
-                                tx_tok = d.get(10, 0)
-                                if p_tok > 0 or c_tok > 0 or out_tok > 0:
-                                    tok_entry = (p_tok, out_tok, c_tok, th_tok, tx_tok)
-                                    break
+                        if total_entry:
+                            p_tok, out_tok, c_tok, th_tok, tx_tok = total_entry
 
-                        if not tok_entry:
-                            for sfn, swt, sval in sub_fields:
-                                if sfn == 17 and swt == "bytes":
-                                    for tfn, twt, tval in parse_proto(sval):
-                                        if tfn == 2 and twt == "bytes":
-                                            d = {k: v for k, t, v in parse_proto(tval) if t == "varint"}
-                                            p_tok = d.get(2, 0)
-                                            out_tok = d.get(3, 0)
-                                            cw_tok = d.get(4, 0)
-                                            cr_tok = d.get(5, 0)
-                                            c_tok = cw_tok + cr_tok
-                                            th_tok = d.get(9, 0)
-                                            tx_tok = d.get(10, 0)
-                                            if p_tok > 0 or c_tok > 0 or out_tok > 0:
-                                                tok_entry = (p_tok, out_tok, c_tok, th_tok, tx_tok)
-                                                break
-                                    if tok_entry:
-                                        break
+                            # Single-attempt usage for accurate Context Window & Speed (never double-count retries!)
+                            if step_attempts:
+                                t1, t6, t7, last_u = step_attempts[-1]
+                                ctx_p, speed_o, ctx_c, speed_th, speed_tx = last_u
+                                real_ttft = max(0.0, t6 - t1) if (t6 > 0 and t1 > 0 and t6 >= t1) else ttft_s
+                                real_sdur = max(0.0, t7 - t6) if (t7 > 0 and t6 > 0 and t7 >= t6) else stream_s
+                                duration_s = real_ttft + real_sdur
+                                if duration_s <= 0.05:
+                                    real_ttft = ttft_s
+                                    real_sdur = stream_s
+                                    duration_s = ttft_s + stream_s
+                            else:
+                                last_u = s17_entries[-1] if s17_entries else total_entry
+                                ctx_p, speed_o, ctx_c, speed_th, speed_tx = last_u
+                                real_ttft = ttft_s
+                                real_sdur = stream_s
+                                # When retry_cnt > 0 without step timestamps, sfn 11 may be averaged across retries
+                                if retry_cnt > 0 and len(s17_entries) > 1:
+                                    real_ttft = ttft_s * len(s17_entries)
+                                duration_s = real_ttft + real_sdur
 
-                        if tok_entry:
-                            p_tok, out_tok, c_tok, th_tok, tx_tok = tok_entry
                             tps = (
-                                round(out_tok / duration_s, 1)
-                                if duration_s > 0.05
+                                round(speed_o / duration_s, 1)
+                                if duration_s > 0.05 and speed_o > 0
                                 else 0.0
                             )
                             records.append(
@@ -227,8 +262,13 @@ def parse_single_db(db_path, sess_id):
                                     "c": c_tok,
                                     "th": th_tok,
                                     "tx": tx_tok,
-                                    "ttft": round(ttft_s, 2),
-                                    "sdur": round(stream_s, 2),
+                                    "ctx_p": ctx_p,
+                                    "ctx_c": ctx_c,
+                                    "so": speed_o,
+                                    "sth": speed_th,
+                                    "stx": speed_tx,
+                                    "ttft": round(real_ttft, 2),
+                                    "sdur": round(real_sdur, 2),
                                     "dur": round(duration_s, 2),
                                     "tps": tps,
                                     "est_ctx": est_ctx,
@@ -293,9 +333,11 @@ def build_session_summary(sess_id, recs, default_max_context=1000000):
         }
 
     last = recs[-1]
-    ctx = last["c"] + last["p"]
+    last_c = last.get("ctx_c", last["c"])
+    last_p = last.get("ctx_p", last["p"])
+    ctx = last_c + last_p
     est_ctx = last.get("est_ctx") or ctx
-    cache_hit_pct = round((last["c"] / ctx) * 100, 1) if ctx > 0 else 0.0
+    cache_hit_pct = round((last_c / ctx) * 100, 1) if ctx > 0 else 0.0
 
     sum_c = sum(r["c"] for r in recs)
     sum_p = sum(r["p"] for r in recs)
@@ -312,8 +354,8 @@ def build_session_summary(sess_id, recs, default_max_context=1000000):
     speed_recs = [r for r in recs if r["tps"] > 0 and r["dur"] > 0.05]
     last_speed = speed_recs[-1] if speed_recs else last
 
-    # Session-wide average TPS across all valid turns in this session
-    sum_out = sum(r["o"] for r in speed_recs)
+    # Session-wide average TPS across all valid turns using single-attempt output tokens & real durations
+    sum_out = sum(r.get("so", r["o"]) for r in speed_recs)
     sum_dur = sum(r["dur"] for r in speed_recs)
     avg_tps = round(sum_out / sum_dur, 1) if sum_dur > 0.05 else 0.0
     peak_tps = max((r["tps"] for r in speed_recs), default=0.0)
@@ -324,15 +366,15 @@ def build_session_summary(sess_id, recs, default_max_context=1000000):
         "estimated_context": est_ctx,
         "max_context": max_context,
         "context_percent": round((ctx / max_context) * 100, 1) if max_context > 0 else 0.0,
-        "cached_tokens": last["c"],
-        "prompt_tokens": last["p"],
+        "cached_tokens": last_c,
+        "prompt_tokens": last_p,
         "cache_hit_percent": cache_hit_pct,
         "session_cache_hit_percent": sess_cache_hit_pct,
         "session_total_tokens": sum_c + sum_p + sum_o,
         "session_new_tokens": sum_p + sum_o,
-        "output_tokens": last_speed["o"],
-        "thinking_tokens": last_speed["th"],
-        "text_tokens": last_speed["tx"],
+        "output_tokens": last_speed.get("so", last_speed["o"]),
+        "thinking_tokens": last_speed.get("sth", last_speed["th"]),
+        "text_tokens": last_speed.get("stx", last_speed["tx"]),
         "speed_tps": last_speed["tps"],
         "avg_tps": avg_tps,
         "peak_tps": peak_tps,
@@ -516,11 +558,12 @@ def collect_metrics(current_conv_id=None):
     eff_dur = curr_sess["duration_s"] or (fallback_rec["dur"] if fallback_rec else 0.0)
     eff_ttft = curr_sess["ttft_s"] or (fallback_rec.get("ttft", 0.0) if fallback_rec else 0.0)
     eff_sdur = curr_sess["stream_s"] or (fallback_rec.get("sdur", 0.0) if fallback_rec else 0.0)
-    eff_out = curr_sess["output_tokens"] or (fallback_rec["o"] if fallback_rec else 0)
+    eff_out = curr_sess["output_tokens"] or (fallback_rec.get("so", fallback_rec["o"]) if fallback_rec else 0)
 
     return {
         "current_session": curr_sess,
         "sessions": sessions_map,
+        "latest_turn_ts": latest_ts,
         "speed": {
             "tps": eff_tps,
             "avg_tps": curr_sess["avg_tps"],
