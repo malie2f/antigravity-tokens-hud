@@ -79,7 +79,11 @@ function getConversationsSignature() {
       }
     }
     const dayKey = new Date().toISOString().slice(0, 10);
-    return `${dayKey}:${count}:${totalSize}:${Math.floor(maxMtime)}`;
+    let scriptMtime = 0;
+    try {
+      scriptMtime = Math.floor(fs.statSync(TOKEN_STATS_SCRIPT).mtimeMs);
+    } catch (_) {}
+    return `${dayKey}:${scriptMtime}:${count}:${totalSize}:${Math.floor(maxMtime)}`;
   } catch (_) {
     return "";
   }

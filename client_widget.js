@@ -16,11 +16,13 @@
       const trigger = document.querySelector('button[data-testid="model-selector-trigger"]');
       const txt = (trigger?.textContent || "").toLowerCase();
       if (txt.includes("claude")) {
-        return txt.includes("5.5") || txt.includes("opus 5") ? 1000000 : 200000;
+        return txt.includes("5.5") || txt.includes("opus 5") ? 840000 : 160000;
       }
-      if (txt.includes("gpt")) return 128000;
+      if (txt.includes("gpt")) return 80000;
+      if (txt.includes("3.1") || txt.includes("lite")) return 128000;
+      if (txt.includes("argon-d")) return 512000;
     } catch (_) {}
-    return 1000000;
+    return 256000;
   }
 
   function getActiveConvId() {
@@ -83,6 +85,13 @@
     if (!n || n <= 0) return "0";
     if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
     if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+    return n + "";
+  }
+
+  function fmtMaxContext(n) {
+    if (!n || n <= 0) return "256k";
+    if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, "") + "M";
+    if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
     return n + "";
   }
 
@@ -355,9 +364,8 @@
     const pct = (session.context_percent != null) ? session.context_percent : 0.0;
     const ctxColor = getContextColor(pct);
     const ctxK = fmtContextNum(session.context_size || 0);
-    const maxK = ((session.max_context || 256000) >= 1000000)
-      ? "1M"
-      : fmtContextNum(session.max_context || 256000);
+    const maxK = fmtMaxContext(session.max_context || 256000);
+    const compactCount = session.compaction_count || 0;
     const cacheHitPct = (session.cache_hit_percent != null) ? session.cache_hit_percent : 0.0;
     const sessCacheHitPct = (session.session_cache_hit_percent != null) ? session.session_cache_hit_percent : cacheHitPct;
 
@@ -519,9 +527,12 @@
             </div>
           </div>
 
-          <!-- Context Window Usage: 已用/总共 百分之 + 进度圆圈 -->
+          <!-- Context Window Usage (Auto-Compaction Threshold): 已用/压缩阈值 百分之 + 进度圆圈 -->
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px;">
-            <span style="font-size: 12.5px; color: #bcbdc6;">当前会话上下文</span>
+            <div style="display: flex; align-items: center; gap: 5px;">
+              <span style="font-size: 12.5px; color: #bcbdc6;">当前上下文 (压缩阈值)</span>
+              <span id="agy-pop-compact-badge" style="display: ${compactCount > 0 ? 'inline-block' : 'none'}; font-size: 9.5px; background: rgba(251, 191, 36, 0.14); color: #fbbf24; padding: 1px 4px; border-radius: 3px;">已压缩 ${compactCount}次</span>
+            </div>
             <div style="display: flex; align-items: center; gap: 6px; font-size: 12.5px;">
               <span id="agy-pop-ctx-num" style="color: #e3e3e3; font-weight: 500;">${ctxK}/${maxK}</span>
               <span id="agy-pop-ctx-pct" style="color: ${ctxColor}; font-weight: 600;">${pct.toFixed(1)}%</span>
@@ -626,9 +637,8 @@
     const pct = (session.context_percent != null) ? session.context_percent : 0.0;
     const ctxColor = getContextColor(pct);
     const ctxK = fmtContextNum(session.context_size || 0);
-    const maxK = ((session.max_context || 256000) >= 1000000)
-      ? "1M"
-      : fmtContextNum(session.max_context || 256000);
+    const maxK = fmtMaxContext(session.max_context || 256000);
+    const compactCount = session.compaction_count || 0;
     const cacheHitPct = (session.cache_hit_percent != null) ? session.cache_hit_percent : 0.0;
     const sessCacheHitPct = (session.session_cache_hit_percent != null) ? session.session_cache_hit_percent : cacheHitPct;
 
@@ -681,6 +691,12 @@
 
       const popCtxRing = document.getElementById("agy-pop-ctx-ring");
       if (popCtxRing) popCtxRing.innerHTML = renderCircleRing(pct, 15, 5.5, 2.0);
+
+      const popCompactBadge = document.getElementById("agy-pop-compact-badge");
+      if (popCompactBadge) {
+        popCompactBadge.style.display = compactCount > 0 ? "inline-block" : "none";
+        popCompactBadge.textContent = `已压缩 ${compactCount}次`;
+      }
 
       const popCacheHit = document.getElementById("agy-pop-cache-hit");
       if (popCacheHit) popCacheHit.textContent = `${cacheHitPct.toFixed(1)}%`;

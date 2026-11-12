@@ -68,13 +68,22 @@ WshShell.Run "node ""$TargetDir\index.js""", 0, False
 Set-Content -Path $vbsPath -Value $vbsContent -Encoding ASCII
 Write-Host "✅ Configured Windows Startup auto-launch: $vbsPath" -ForegroundColor Green
 
-# 5. Start HUD Daemon Immediately (Silent background process)
+# 5. Start HUD Daemon Immediately (Detached from any terminal/IDE Job Object via WMI)
 Write-Host "🚀 Launching background daemon..." -ForegroundColor Yellow
-$processInfo = New-Object System.Diagnostics.ProcessStartInfo
-$processInfo.FileName = "wscript.exe"
-$processInfo.Arguments = """$vbsPath"""
-$processInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-[System.Diagnostics.Process]::Start($processInfo) | Out-Null
+try {
+    $wmiRes = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine = "wscript.exe ""$vbsPath"""
+    } -ErrorAction Stop
+    if ($wmiRes.ReturnValue -ne 0) {
+        throw "Win32_Process.Create returned $($wmiRes.ReturnValue)"
+    }
+} catch {
+    $processInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $processInfo.FileName = "wscript.exe"
+    $processInfo.Arguments = """$vbsPath"""
+    $processInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    [System.Diagnostics.Process]::Start($processInfo) | Out-Null
+}
 
 Start-Sleep -Seconds 1
 
@@ -86,7 +95,7 @@ Write-Host ""
 Write-Host "📌 What to do next:" -ForegroundColor Cyan
 Write-Host "  1. Open or restart Google Antigravity." -ForegroundColor White
 Write-Host "  2. Look at the bottom toolbar beside the model selector:" -ForegroundColor White
-Write-Host "     [⚡ XX.X tok/s  XX.Xk/1M XX% ◯]" -ForegroundColor Green
+Write-Host "     [⚡ XX.X tok/s  XX.Xk/256k XX% ◯]" -ForegroundColor Green
 Write-Host "  3. Click it to view the full popover with real-time speed, context caching hit rate, and 25-week activity heatmap!" -ForegroundColor White
 Write-Host ""
 Write-Host "🗑️ To uninstall anytime: Run $TargetDir\uninstall.ps1" -ForegroundColor Gray

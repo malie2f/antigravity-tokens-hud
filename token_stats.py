@@ -10,7 +10,7 @@ from collections import defaultdict
 
 CONVERSATIONS_DIR = os.path.expanduser("~/.gemini/antigravity/conversations")
 CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stats_cache.json")
-CACHE_SCHEMA_VERSION = 7
+CACHE_SCHEMA_VERSION = 9
 
 
 def decode_varint(data, offset):
@@ -115,6 +115,7 @@ def parse_single_db(db_path, sess_id):
 
         step_times = {}
         step_details = {}
+        compact_steps = []
         try:
             c.execute("SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL")
             for s_idx, meta in c.fetchall():
@@ -136,9 +137,34 @@ def parse_single_db(db_path, sess_id):
                             s_usage = extract_usage_dict(val)
                 if s_usage is not None or t1 > 0:
                     step_details[s_idx] = (t1, t6, t7, s_usage)
+
+            # Detect completed context-collapsing checkpoints (step_type=23, status=3, payload.f30.f24=1)
+            # Manual `/compact` writes step_type=23 WITHOUT writing to gen_metadata until the next user message!
+            c.execute("SELECT idx, step_payload FROM steps WHERE step_type = 23 AND status = 3 ORDER BY idx ASC")
+            for s_idx, payload in c.fetchall():
+                if not payload:
+                    continue
+                is_collapse = False
+                sum_bytes = 0
+                for pfn, pwt, pval in parse_proto(payload):
+                    if pfn == 30 and pwt == "bytes":
+                        for sfn, swt, sval in parse_proto(pval):
+                            if sfn == 24 and swt == "varint" and sval == 1:
+                                is_collapse = True
+                            elif sfn == 5 and swt == "bytes":
+                                sum_bytes = len(sval)
+                if is_collapse and sum_bytes > 0:
+                    det = step_details.get(s_idx)
+                    u = det[3] if det else None
+                    sum_tok = (u[4] or u[1]) if u else 0
+                    if sum_tok <= 0:
+                        sum_tok = max(500, int(round(sum_bytes / 3.2)))
+                    compact_steps.append((s_idx, sum_tok))
         except Exception:
             pass
 
+        max_gm_step = -1
+        rec_min_steps = []
         try:
             c.execute("SELECT idx, data FROM gen_metadata ORDER BY idx ASC")
             for idx, data in c.fetchall():
@@ -151,6 +177,11 @@ def parse_single_db(db_path, sess_id):
                             step_indices.extend(decode_packed_varints(val))
                         elif wt == "varint":
                             step_indices.append(val)
+
+                if step_indices:
+                    max_s = max(step_indices)
+                    if max_s > max_gm_step:
+                        max_gm_step = max_s
 
                 ts = 0
                 step_attempts = []
@@ -170,9 +201,10 @@ def parse_single_db(db_path, sess_id):
                         stream_s = 0.0
                         retry_cnt = 0
                         model_name = ""
-                        max_ctx = 1000000
+                        max_ctx = 256000
                         est_ctx = 0
                         compact_lim = 0
+                        compacted_flag = 0
                         sub_fields = parse_proto(val)
 
                         s4_entry = None
@@ -191,7 +223,7 @@ def parse_single_db(db_path, sess_id):
                             # sfn 12: streamingDuration (google.protobuf.Duration)
                             elif sfn == 12 and swt == "bytes":
                                 stream_s = parse_proto_timestamp(sval)
-                            # sfn 9: chatStartMetadata -> cfn 10: contextWindowMetadata
+                            # sfn 9: chatStartMetadata -> cfn 10: ContextWindowMetadata (f1=est_ctx, f2=compacted_flag, f4=compact_limit)
                             elif sfn == 9 and swt == "bytes":
                                 for cfn, cwt, cval in parse_proto(sval):
                                     if cfn == 10 and cwt == "bytes":
@@ -199,6 +231,7 @@ def parse_single_db(db_path, sess_id):
                                             k: v for k, t, v in parse_proto(cval) if t == "varint"
                                         }
                                         est_ctx = ctx_fields.get(1, 0)
+                                        compacted_flag = ctx_fields.get(2, 0)
                                         compact_lim = ctx_fields.get(4, 0)
                             # sfn 4: cumulative exa.codeium_common_pb.ModelUsageStats (sums retries)
                             elif sfn == 4 and swt == "bytes" and s4_entry is None:
@@ -212,12 +245,17 @@ def parse_single_db(db_path, sess_id):
                                             s17_entries.append(u)
                                             break
 
-                        if "claude" in model_name:
-                            max_ctx = 1000000 if ("opus-5" in model_name or compact_lim > 200000) else 200000
+                        # Prefer exact server-enforced auto-compaction threshold from Protobuf (cfn10.f4)
+                        if compact_lim > 0:
+                            max_ctx = compact_lim
+                        elif "claude" in model_name:
+                            max_ctx = 840000 if "opus-5" in model_name else 160000
                         elif "gpt" in model_name:
+                            max_ctx = 80000
+                        elif "3.1" in model_name or "lite" in model_name:
                             max_ctx = 128000
                         else:
-                            max_ctx = 1000000  # Default 1M for Gemini models
+                            max_ctx = 256000  # Default 256k auto-compaction threshold for Gemini in Antigravity
 
                         # Cumulative billed usage for 5h / weekly / historical / heatmap
                         total_entry = s4_entry or (s17_entries[-1] if s17_entries else None)
@@ -253,6 +291,7 @@ def parse_single_db(db_path, sess_id):
                                 if duration_s > 0.05 and speed_o > 0
                                 else 0.0
                             )
+                            rec_min_steps.append(min(step_indices) if step_indices else -1)
                             records.append(
                                 {
                                     "idx": idx,
@@ -273,8 +312,32 @@ def parse_single_db(db_path, sess_id):
                                     "tps": tps,
                                     "est_ctx": est_ctx,
                                     "max_ctx": max_ctx,
+                                    "compacted": 1 if compacted_flag == 2 else 0,
                                 }
                             )
+
+            # Handle trailing `/compact` (or auto-compaction) where step_type=23 finished AFTER the last gen_metadata turn
+            if records and compact_steps:
+                trailing = [cs for cs in compact_steps if cs[0] > max_gm_step]
+                if trailing:
+                    base_overhead = 13000
+                    completed = [cs for cs in compact_steps if cs[0] <= max_gm_step]
+                    for prev_c_idx, prev_sum_tok in reversed(completed):
+                        if prev_sum_tok <= 0:
+                            continue
+                        next_rec = None
+                        for r_i, min_s in enumerate(rec_min_steps):
+                            if min_s > prev_c_idx:
+                                next_rec = records[r_i]
+                                break
+                        if next_rec is not None:
+                            obs_ctx = next_rec.get("ctx_p", next_rec["p"]) + next_rec.get("ctx_c", next_rec["c"])
+                            if obs_ctx > prev_sum_tok:
+                                base_overhead = max(8000, min(30000, obs_ctx - prev_sum_tok))
+                                break
+                    est_post_ctx = base_overhead + trailing[-1][1]
+                    records[-1]["trailing_compact"] = len(trailing)
+                    records[-1]["post_compact_ctx"] = est_post_ctx
         except Exception:
             pass
         conn.close()
@@ -306,7 +369,7 @@ def save_cache(dbs_cache):
         pass
 
 
-def build_session_summary(sess_id, recs, default_max_context=1000000):
+def build_session_summary(sess_id, recs, default_max_context=256000):
     if not recs:
         return {
             "session_id": sess_id,
@@ -314,6 +377,7 @@ def build_session_summary(sess_id, recs, default_max_context=1000000):
             "estimated_context": 0,
             "max_context": default_max_context,
             "context_percent": 0.0,
+            "compaction_count": 0,
             "cached_tokens": 0,
             "prompt_tokens": 0,
             "cache_hit_percent": 0.0,
@@ -333,23 +397,33 @@ def build_session_summary(sess_id, recs, default_max_context=1000000):
         }
 
     last = recs[-1]
-    last_c = last.get("ctx_c", last["c"])
-    last_p = last.get("ctx_p", last["p"])
-    ctx = last_c + last_p
-    est_ctx = last.get("est_ctx") or ctx
-    cache_hit_pct = round((last_c / ctx) * 100, 1) if ctx > 0 else 0.0
+    trailing_compact = last.get("trailing_compact", 0)
+    if trailing_compact > 0 and last.get("post_compact_ctx", 0) > 0:
+        ctx = last["post_compact_ctx"]
+        est_ctx = ctx
+        last_c = 0
+        last_p = ctx
+        cache_hit_pct = 0.0
+    else:
+        last_c = last.get("ctx_c", last["c"])
+        last_p = last.get("ctx_p", last["p"])
+        ctx = last_c + last_p
+        est_ctx = last.get("est_ctx") or ctx
+        cache_hit_pct = round((last_c / ctx) * 100, 1) if ctx > 0 else 0.0
 
     sum_c = sum(r["c"] for r in recs)
     sum_p = sum(r["p"] for r in recs)
     sum_o = sum(r["o"] for r in recs)
     sess_cache_hit_pct = round((sum_c / (sum_c + sum_p)) * 100, 1) if (sum_c + sum_p) > 0 else 0.0
 
-    # Find most recent positive max_ctx in session, fallback to 1000000 (1M)
+    # Find most recent positive max_ctx (auto-compaction threshold) in session, fallback to 256k
     max_context = default_max_context
     for r in reversed(recs):
         if r.get("max_ctx", 0) > 0:
             max_context = r["max_ctx"]
             break
+
+    compaction_count = sum(r.get("compacted", 0) for r in recs) + trailing_compact
 
     speed_recs = [r for r in recs if r["tps"] > 0 and r["dur"] > 0.05]
     last_speed = speed_recs[-1] if speed_recs else last
@@ -366,6 +440,7 @@ def build_session_summary(sess_id, recs, default_max_context=1000000):
         "estimated_context": est_ctx,
         "max_context": max_context,
         "context_percent": round((ctx / max_context) * 100, 1) if max_context > 0 else 0.0,
+        "compaction_count": compaction_count,
         "cached_tokens": last_c,
         "prompt_tokens": last_p,
         "cache_hit_percent": cache_hit_pct,
