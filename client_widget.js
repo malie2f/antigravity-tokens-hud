@@ -4,6 +4,7 @@
 
   let isPopoverOpen = false;
   let activeActivityTab = "daily"; // "daily" | "weekly" | "total"
+  let activeUsageTab = "5h"; // "5h" | "7d" | "hist"
   let currentMetrics = window.__AGY_DATA__ || null;
 
   // Clean up any legacy global quota state from older versions
@@ -437,6 +438,107 @@
     }
   };
 
+  function getPoolDotColor(pool, T) {
+    if (pool === "gemini_pro") return T.accent;
+    if (pool === "gemini_flash") return T.green;
+    if (pool === "claude") return T.amber;
+    return T.textMuted;
+  }
+
+  function renderUsageContent(data, T = getThemePalette()) {
+    const win = activeUsageTab === "7d"
+      ? (data?.usage_weekly || {})
+      : (activeUsageTab === "hist" ? (data?.usage_historical || {}) : (data?.usage_5h || {}));
+    const pools = Array.isArray(win.by_pool) ? win.by_pool : [];
+
+    if (!win.total_requests || pools.length === 0) {
+      return `
+        <div style="padding: 10px 0; text-align: center; font-size: 11.5px; color: ${T.textDim};">
+          该时间窗口内暂无模型调用记录
+        </div>
+      `;
+    }
+
+    const totalRightSuffix = activeUsageTab === "hist"
+      ? `(${win.total_sessions || 0}会话)`
+      : `(${win.total_requests || 0}次)`;
+
+    return `
+      <div style="display: flex; justify-content: flex-end; font-size: 10px; color: ${T.textDim}; margin-bottom: 6px;">
+        <span>新增 / 总吞吐 (命中率)</span>
+      </div>
+      <div style="max-height: 196px; overflow-y: auto; padding-right: 2px;">
+        ${pools.map((p, idx) => {
+          const dotColor = getPoolDotColor(p.pool, T);
+          const models = Array.isArray(p.models) ? p.models : [];
+          return `
+            <div style="${idx > 0 ? 'margin-top: 8px;' : ''}">
+              <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11.5px;">
+                <span style="display: inline-flex; align-items: center; gap: 5px; color: ${T.text}; font-weight: 600;">
+                  <span style="width: 6px; height: 6px; border-radius: 50%; background: ${dotColor}; flex-shrink: 0;"></span>
+                  <span>${p.label}</span>
+                </span>
+                <span style="color: ${T.text}; font-weight: 500; font-size: 11.5px;">
+                  <span style="color: ${dotColor};">${fmtTok(p.new_tokens || 0)}</span>
+                  <span style="color: ${T.slash}; margin: 0 2px;">/</span>
+                  <span>${fmtTok(p.total_tokens || 0)}</span>
+                  <span style="color: ${T.green}; font-size: 10px; margin-left: 3px;">(${(p.cache_hit_percent || 0).toFixed(0)}%)</span>
+                  <span style="color: ${T.textMuted}; font-size: 10px; margin-left: 2px;">(${p.total_requests || 0}次)</span>
+                </span>
+              </div>
+              ${models.length > 0 ? `
+                <div style="margin: 3px 0 0 8px; padding-left: 8px; border-left: 1px solid ${T.divider}; display: flex; flex-direction: column; gap: 2.5px;">
+                  ${models.map(m => `
+                    <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px;">
+                      <span style="color: ${T.textSub}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 138px;" title="${m.label}">${m.label}</span>
+                      <span style="color: ${T.textMuted}; white-space: nowrap;">
+                        <span style="color: ${T.textSub}; font-weight: 500;">${fmtTok(m.new_tokens || 0)}</span>
+                        <span style="color: ${T.slash}; margin: 0 2px;">/</span>
+                        <span>${fmtTok(m.total_tokens || 0)}</span>
+                        <span style="color: ${T.textDim}; font-size: 9.5px; margin-left: 2px;">(${(m.cache_hit_percent || 0).toFixed(0)}%)</span>
+                        <span style="color: ${T.textDim}; font-size: 9.5px; margin-left: 1px;">(${m.total_requests || 0}次)</span>
+                      </span>
+                    </div>
+                  `).join("")}
+                </div>
+              ` : ""}
+            </div>
+          `;
+        }).join("")}
+      </div>
+      <div style="margin-top: 8px; padding-top: 6px; border-top: 1px dashed ${T.divider}; display: flex; justify-content: space-between; align-items: center; font-size: 11.5px;">
+        <span style="color: ${T.textMuted};">合计</span>
+        <span style="color: ${T.text}; font-weight: 500;">
+          <span style="color: ${T.accent};">${fmtTok(win.new_tokens || 0)}</span>
+          <span style="color: ${T.slash}; margin: 0 2px;">/</span>
+          <span>${fmtTok(win.total_tokens || 0)}</span>
+          <span style="color: ${T.green}; font-size: 10px; margin-left: 3px;">(${(win.cache_hit_percent || 0).toFixed(0)}%)</span>
+          <span style="color: ${T.textMuted}; font-size: 10px; margin-left: 2px;">${totalRightSuffix}</span>
+        </span>
+      </div>
+    `;
+  }
+
+  window.__AGY_SWITCH_USAGE_TAB__ = (tab) => {
+    activeUsageTab = tab;
+    const T = getThemePalette();
+    const container = document.getElementById("agy-usage-tab-content");
+    if (container && currentMetrics) {
+      container.innerHTML = renderUsageContent(currentMetrics, T);
+    }
+    const tab5h = document.getElementById("agy-utab-5h");
+    const tab7d = document.getElementById("agy-utab-7d");
+    const tabHist = document.getElementById("agy-utab-hist");
+    if (tab5h && tab7d && tabHist) {
+      tab5h.style.color = tab === "5h" ? T.title : T.textDim;
+      tab5h.style.fontWeight = tab === "5h" ? "600" : "normal";
+      tab7d.style.color = tab === "7d" ? T.title : T.textDim;
+      tab7d.style.fontWeight = tab === "7d" ? "600" : "normal";
+      tabHist.style.color = tab === "hist" ? T.title : T.textDim;
+      tabHist.style.fontWeight = tab === "hist" ? "600" : "normal";
+    }
+  };
+
   window.__AGY_CLOSE_POPOVER__ = () => {
     isPopoverOpen = false;
     window.__AGY_HIDE_TOOLTIP__();
@@ -495,10 +597,6 @@
     const sdur = session.stream_s || 0;
     const outTok = session.output_tokens || 0;
     const totalTurns = session.total_turns || 0;
-
-    const u5h = data.usage_5h || {};
-    const uWeekly = data.usage_weekly || {};
-    const uHist = data.usage_historical || {};
 
     // Native Toolbar Button (Flush ghost button, auto-adapts to Onyx Light & Dark)
     let btn = document.getElementById("antigravity-token-btn");
@@ -700,44 +798,22 @@
 
         <div style="height: 1px; background: ${PT.divider}; margin: 12px 0;"></div>
 
-        <!-- Section 3: 消耗统计 (新增消耗 / 含缓存总吞吐) -->
+        <!-- Section 3: 近期消耗 (按配额池与模型精准拆分) -->
         <div>
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
             <span style="font-size: 13.5px; font-weight: 600; color: ${PT.title}; letter-spacing: -0.2px;">近期消耗</span>
-            <span style="font-size: 10px; color: ${PT.textDim};">新增 / 总吞吐 (命中率)</span>
-          </div>
-          
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; font-size: 12px;">
-            <span style="color: ${PT.textSub};">5小时已消耗</span>
-            <span style="color: ${PT.text}; font-weight: 500;">
-              <span id="agy-pop-u5h-new" style="color: ${PT.accent};">${fmtTok(u5h.new_tokens || 0)}</span>
-              <span style="color: ${PT.slash}; margin: 0 3px;">/</span>
-              <span id="agy-pop-u5h">${fmtTok(u5h.total_tokens || 0)}</span>
-              <span id="agy-pop-u5h-hit" style="color: ${PT.green}; font-size: 10.5px; margin-left: 3px;">(${(u5h.cache_hit_percent || 0).toFixed(0)}%)</span>
-              <span id="agy-pop-u5h-req" style="color: ${PT.textMuted}; font-size: 10.5px; margin-left: 2px;">(${u5h.total_requests || 0}次)</span>
-            </span>
+            <div style="display: flex; gap: 8px; font-size: 11px; cursor: pointer;">
+              <span id="agy-utab-5h" style="color: ${activeUsageTab === '5h' ? PT.title : PT.textDim}; font-weight: ${activeUsageTab === '5h' ? '600' : 'normal'}; transition: color 0.15s ease;"
+                    onclick="window.__AGY_SWITCH_USAGE_TAB__('5h')">近5小时</span>
+              <span id="agy-utab-7d" style="color: ${activeUsageTab === '7d' ? PT.title : PT.textDim}; font-weight: ${activeUsageTab === '7d' ? '600' : 'normal'}; transition: color 0.15s ease;"
+                    onclick="window.__AGY_SWITCH_USAGE_TAB__('7d')">近7天</span>
+              <span id="agy-utab-hist" style="color: ${activeUsageTab === 'hist' ? PT.title : PT.textDim}; font-weight: ${activeUsageTab === 'hist' ? '600' : 'normal'}; transition: color 0.15s ease;"
+                    onclick="window.__AGY_SWITCH_USAGE_TAB__('hist')">历史</span>
+            </div>
           </div>
 
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; font-size: 12px;">
-            <span style="color: ${PT.textSub};">本周已消耗</span>
-            <span style="color: ${PT.text}; font-weight: 500;">
-              <span id="agy-pop-uw-new" style="color: ${PT.accent};">${fmtTok(uWeekly.new_tokens || 0)}</span>
-              <span style="color: ${PT.slash}; margin: 0 3px;">/</span>
-              <span id="agy-pop-uw">${fmtTok(uWeekly.total_tokens || 0)}</span>
-              <span id="agy-pop-uw-hit" style="color: ${PT.green}; font-size: 10.5px; margin-left: 3px;">(${(uWeekly.cache_hit_percent || 0).toFixed(0)}%)</span>
-              <span id="agy-pop-uw-req" style="color: ${PT.textMuted}; font-size: 10.5px; margin-left: 2px;">(${uWeekly.total_requests || 0}次)</span>
-            </span>
-          </div>
-
-          <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px;">
-            <span style="color: ${PT.textSub};">历史累计总耗</span>
-            <span style="color: ${PT.text}; font-weight: 500;">
-              <span id="agy-pop-uh-new" style="color: ${PT.accent};">${fmtTok(uHist.new_tokens || 0)}</span>
-              <span style="color: ${PT.slash}; margin: 0 3px;">/</span>
-              <span id="agy-pop-uh">${fmtTok(uHist.total_tokens || 0)}</span>
-              <span id="agy-pop-uh-hit" style="color: ${PT.green}; font-size: 10.5px; margin-left: 3px;">(${(uHist.cache_hit_percent || 0).toFixed(0)}%)</span>
-              <span id="agy-pop-uh-sess" style="color: ${PT.textMuted}; font-size: 10.5px; margin-left: 2px;">(${uHist.total_sessions || 0}会话)</span>
-            </span>
+          <div id="agy-usage-tab-content">
+            ${renderUsageContent(data, PT)}
           </div>
         </div>
       `;
@@ -833,32 +909,8 @@
       const actContainer = document.getElementById("agy-activity-tab-content");
       if (actContainer) actContainer.innerHTML = renderActivityContent(newData, T);
 
-      const popU5hNew = document.getElementById("agy-pop-u5h-new");
-      if (popU5hNew) popU5hNew.textContent = fmtTok(newData.usage_5h?.new_tokens || 0);
-      const popU5h = document.getElementById("agy-pop-u5h");
-      if (popU5h) popU5h.textContent = fmtTok(newData.usage_5h?.total_tokens || 0);
-      const popU5hHit = document.getElementById("agy-pop-u5h-hit");
-      if (popU5hHit) popU5hHit.textContent = `(${(newData.usage_5h?.cache_hit_percent || 0).toFixed(0)}%)`;
-      const popU5hReq = document.getElementById("agy-pop-u5h-req");
-      if (popU5hReq) popU5hReq.textContent = `(${newData.usage_5h?.total_requests || 0}次)`;
-
-      const popUWNew = document.getElementById("agy-pop-uw-new");
-      if (popUWNew) popUWNew.textContent = fmtTok(newData.usage_weekly?.new_tokens || 0);
-      const popUW = document.getElementById("agy-pop-uw");
-      if (popUW) popUW.textContent = fmtTok(newData.usage_weekly?.total_tokens || 0);
-      const popUWHit = document.getElementById("agy-pop-uw-hit");
-      if (popUWHit) popUWHit.textContent = `(${(newData.usage_weekly?.cache_hit_percent || 0).toFixed(0)}%)`;
-      const popUWReq = document.getElementById("agy-pop-uw-req");
-      if (popUWReq) popUWReq.textContent = `(${newData.usage_weekly?.total_requests || 0}次)`;
-
-      const popUHNew = document.getElementById("agy-pop-uh-new");
-      if (popUHNew) popUHNew.textContent = fmtTok(newData.usage_historical?.new_tokens || 0);
-      const popUH = document.getElementById("agy-pop-uh");
-      if (popUH) popUH.textContent = fmtTok(newData.usage_historical?.total_tokens || 0);
-      const popUHHit = document.getElementById("agy-pop-uh-hit");
-      if (popUHHit) popUHHit.textContent = `(${(newData.usage_historical?.cache_hit_percent || 0).toFixed(0)}%)`;
-      const popUHSess = document.getElementById("agy-pop-uh-sess");
-      if (popUHSess) popUHSess.textContent = `(${newData.usage_historical?.total_sessions || 0}会话)`;
+      const usageContainer = document.getElementById("agy-usage-tab-content");
+      if (usageContainer) usageContainer.innerHTML = renderUsageContent(newData, T);
     }
 
     return true;

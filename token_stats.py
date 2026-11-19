@@ -1,3 +1,4 @@
+import re
 import os
 import sys
 import glob
@@ -10,7 +11,65 @@ from collections import defaultdict
 
 CONVERSATIONS_DIR = os.path.expanduser("~/.gemini/antigravity/conversations")
 CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stats_cache.json")
-CACHE_SCHEMA_VERSION = 9
+CACHE_SCHEMA_VERSION = 11
+
+POOL_META = {
+    "gemini_pro": ("Gemini Pro 池", 0),
+    "gemini_flash": ("Gemini Flash 池", 1),
+    "claude": ("Claude 池", 2),
+    "gpt": ("GPT / 其他", 3),
+}
+
+
+def normalize_model_info(model_name, display_name=""):
+    m = (model_name or "").strip().lower()
+    dn = (display_name or "").strip()
+
+    # Determine Antigravity Quota Pool
+    if "claude" in m or "claude" in dn.lower():
+        pool = "claude"
+    elif "gpt" in m or "openai" in m or "gpt" in dn.lower():
+        pool = "gpt"
+    elif "flash" in m or "lite" in m or "flash" in dn.lower() or "lite" in dn.lower():
+        pool = "gemini_flash"
+    elif "gemini" in m or "orchestrator" in m or "gemini" in dn.lower() or "orchestrator" in dn.lower():
+        pool = "gemini_pro"
+    else:
+        pool = "gpt" if m else "gemini_pro"
+
+    # Canonical clean model label (merge internal A/B suffixes like -tiered, -trial, -c, -d, -w, -safety-le)
+    if "worker" in m:
+        label = "Flash Worker (子代理)"
+    elif "orchestrator" in m:
+        label = "Pro Orchestrator"
+    elif dn:
+        # Strip reasoning effort tags e.g. " (High)", " (XHigh)", " (Medium)", " (Low)", " (Thinking)"
+        label = re.sub(r"\s*\((?:High|XHigh|Medium|Low|Thinking)\)\s*$", "", dn, flags=re.I).strip()
+    elif m:
+        cleaned = re.sub(
+            r"-(?:tiered-high|tiered-low|tiered|safety-le|trial|high-control|high|medium|low|thinking|[cdwn])$",
+            "",
+            m,
+        )
+        # Join split minor versions on Claude/model slugs e.g. claude-opus-5-5 -> claude-opus-5.5
+        cleaned = re.sub(r"-(\d+)-(\d+)(?=-|$)", r"-\1.\2", cleaned)
+        if cleaned.startswith("gemini-flash-"):
+            cleaned = cleaned.replace("gemini-flash-", "gemini-") + "-flash"
+        parts = []
+        for p in cleaned.split("-"):
+            if p in ("gpt", "oss"):
+                parts.append(p.upper())
+            elif p in ("agy",):
+                continue
+            elif any(c.isdigit() for c in p):
+                parts.append(p)
+            else:
+                parts.append(p.capitalize())
+        label = " ".join(parts)
+    else:
+        label = "未知模型"
+
+    return pool, POOL_META[pool][0], label
 
 
 def decode_varint(data, offset):
@@ -201,6 +260,7 @@ def parse_single_db(db_path, sess_id):
                         stream_s = 0.0
                         retry_cnt = 0
                         model_name = ""
+                        model_display = ""
                         max_ctx = 256000
                         est_ctx = 0
                         compact_lim = 0
@@ -214,6 +274,9 @@ def parse_single_db(db_path, sess_id):
                             # sfn 19: model name (e.g. gemini-3.8-flash, gemini-4-carbon, claude-sonnet-4-6)
                             if sfn == 19 and swt == "bytes":
                                 model_name = sval.decode("utf-8", errors="ignore").lower()
+                            # sfn 21: human-readable display name (e.g. "Gemini 4 Hydrogen (XHigh)")
+                            elif sfn == 21 and swt == "bytes":
+                                model_display = sval.decode("utf-8", errors="ignore")
                             # sfn 14: retry count within this turn
                             elif sfn == 14 and swt == "varint":
                                 retry_cnt = sval
@@ -296,6 +359,8 @@ def parse_single_db(db_path, sess_id):
                                 {
                                     "idx": idx,
                                     "ts": ts,
+                                    "m": model_name,
+                                    "dn": model_display,
                                     "p": p_tok,
                                     "o": out_tok,
                                     "c": c_tok,
@@ -527,6 +592,72 @@ def collect_metrics(current_conv_id=None):
         thk = sum(r["th"] for _, r in filtered)
         tot_in = cac + inp
         hit_pct = round((cac / tot_in) * 100, 1) if tot_in > 0 else 0.0
+
+        pool_buckets = {}
+        for _, r in filtered:
+            pool_key, pool_label, m_label = normalize_model_info(r.get("m", ""), r.get("dn", ""))
+            pb = pool_buckets.get(pool_key)
+            if pb is None:
+                pb = {
+                    "pool": pool_key,
+                    "label": pool_label,
+                    "reqs": 0,
+                    "inp": 0,
+                    "out": 0,
+                    "cac": 0,
+                    "models": {},
+                }
+                pool_buckets[pool_key] = pb
+            pb["reqs"] += 1
+            pb["inp"] += r["p"]
+            pb["out"] += r["o"]
+            pb["cac"] += r["c"]
+
+            mb = pb["models"].get(m_label)
+            if mb is None:
+                mb = {"label": m_label, "reqs": 0, "inp": 0, "out": 0, "cac": 0}
+                pb["models"][m_label] = mb
+            mb["reqs"] += 1
+            mb["inp"] += r["p"]
+            mb["out"] += r["o"]
+            mb["cac"] += r["c"]
+
+        by_pool = []
+        for pool_key, pb in sorted(
+            pool_buckets.items(),
+            key=lambda kv: (-(kv[1]["inp"] + kv[1]["out"]), POOL_META[kv[0]][1]),
+        ):
+            p_new = pb["inp"] + pb["out"]
+            p_tot = p_new + pb["cac"]
+            p_in_sum = pb["inp"] + pb["cac"]
+            p_hit = round((pb["cac"] / p_in_sum) * 100, 1) if p_in_sum > 0 else 0.0
+            models_list = []
+            for mb in sorted(pb["models"].values(), key=lambda x: -(x["inp"] + x["out"])):
+                m_new = mb["inp"] + mb["out"]
+                m_tot = m_new + mb["cac"]
+                m_in_sum = mb["inp"] + mb["cac"]
+                m_hit = round((mb["cac"] / m_in_sum) * 100, 1) if m_in_sum > 0 else 0.0
+                models_list.append(
+                    {
+                        "label": mb["label"],
+                        "total_requests": mb["reqs"],
+                        "new_tokens": m_new,
+                        "total_tokens": m_tot,
+                        "cache_hit_percent": m_hit,
+                    }
+                )
+            by_pool.append(
+                {
+                    "pool": pool_key,
+                    "label": pb["label"],
+                    "total_requests": pb["reqs"],
+                    "new_tokens": p_new,
+                    "total_tokens": p_tot,
+                    "cache_hit_percent": p_hit,
+                    "models": models_list,
+                }
+            )
+
         return {
             "total_requests": len(filtered),
             "input_tokens": inp,
@@ -536,6 +667,7 @@ def collect_metrics(current_conv_id=None):
             "cache_hit_percent": hit_pct,
             "new_tokens": inp + out,
             "total_tokens": cac + inp + out,
+            "by_pool": by_pool,
         }
 
     h5_recs = [(s, r) for s, r in all_records if r["ts"] >= h5_ts]
@@ -573,7 +705,11 @@ def collect_metrics(current_conv_id=None):
             d_cur = col_first_day + timedelta(days=r_idx)
             if d_cur <= today_local and d_cur.month != last_month:
                 if col == 0 or d_cur.day <= 7:
-                    month_labels.append({"col": col, "label": f"{d_cur.month}月"})
+                    # Avoid crowded labels like "5月6月" when col 0 starts at end of previous month
+                    if month_labels and col - month_labels[-1]["col"] < 2:
+                        month_labels[-1] = {"col": col, "label": f"{d_cur.month}月"}
+                    else:
+                        month_labels.append({"col": col, "label": f"{d_cur.month}月"})
                     last_month = d_cur.month
                 break
         for row in range(7):
