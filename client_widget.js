@@ -438,6 +438,30 @@
     }
   };
 
+  function ensureHudStyles() {
+    let style = document.getElementById("agy-hud-style");
+    if (!style) {
+      style = document.createElement("style");
+      style.id = "agy-hud-style";
+      (document.head || document.documentElement).appendChild(style);
+    }
+    style.textContent = `
+      .agy-usage-scroll::-webkit-scrollbar {
+        width: 4px !important;
+      }
+      .agy-usage-scroll::-webkit-scrollbar-track {
+        background: transparent !important;
+      }
+      .agy-usage-scroll::-webkit-scrollbar-thumb {
+        background: rgba(128, 134, 139, 0.35) !important;
+        border-radius: 999px !important;
+      }
+      .agy-usage-scroll::-webkit-scrollbar-thumb:hover {
+        background: rgba(128, 134, 139, 0.6) !important;
+      }
+    `;
+  }
+
   function getModelDotColor(family, T) {
     if (family === "pro") return T.accent;
     if (family === "flash") return T.green;
@@ -446,6 +470,7 @@
   }
 
   function renderUsageContent(data, T = getThemePalette()) {
+    ensureHudStyles();
     const win = activeUsageTab === "7d"
       ? (data?.usage_weekly || {})
       : (activeUsageTab === "hist" ? (data?.usage_historical || {}) : (data?.usage_5h || {}));
@@ -467,16 +492,16 @@
       <div style="display: flex; justify-content: flex-end; font-size: 10px; color: ${T.textDim}; margin-bottom: 6px;">
         <span>新增 / 总吞吐 (命中率)</span>
       </div>
-      <div style="max-height: 175px; overflow-y: auto; padding-right: 2px; display: flex; flex-direction: column; gap: 5px;">
+      <div class="agy-usage-scroll" style="max-height: 175px; overflow-y: auto; margin-right: -12px; padding-right: 12px; display: flex; flex-direction: column; gap: 5px;">
         ${models.map(m => {
           const dotColor = getModelDotColor(m.family, T);
           return `
-            <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11.5px;">
-              <span style="display: inline-flex; align-items: center; gap: 5px; color: ${T.textSub}; min-width: 0; max-width: 146px;" title="${m.label}">
+            <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11.5px; gap: 8px;">
+              <span style="display: inline-flex; align-items: center; gap: 5px; color: ${T.textSub}; min-width: 0; flex: 1;" title="${m.label}">
                 <span style="width: 5.5px; height: 5.5px; border-radius: 50%; background: ${dotColor}; flex-shrink: 0;"></span>
                 <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${m.label}</span>
               </span>
-              <span style="color: ${T.text}; font-weight: 500; white-space: nowrap;">
+              <span class="agy-usage-row-val" style="color: ${T.text}; font-weight: 500; white-space: nowrap; flex-shrink: 0;">
                 <span style="color: ${dotColor};">${fmtTok(m.new_tokens || 0)}</span>
                 <span style="color: ${T.slash}; margin: 0 2px;">/</span>
                 <span>${fmtTok(m.total_tokens || 0)}</span>
@@ -489,7 +514,7 @@
       </div>
       <div style="margin-top: 8px; padding-top: 6px; border-top: 1px dashed ${T.divider}; display: flex; justify-content: space-between; align-items: center; font-size: 11.5px;">
         <span style="color: ${T.textMuted};">合计</span>
-        <span style="color: ${T.text}; font-weight: 500;">
+        <span id="agy-usage-total-val" style="color: ${T.text}; font-weight: 500;">
           <span style="color: ${T.accent};">${fmtTok(win.new_tokens || 0)}</span>
           <span style="color: ${T.slash}; margin: 0 2px;">/</span>
           <span>${fmtTok(win.total_tokens || 0)}</span>
