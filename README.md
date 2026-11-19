@@ -25,8 +25,8 @@
   * **每天视图**：25 周（175 天）高密度 Google 蓝贡献方块，鼠标悬停展示精确日期与 Token 数量 Tooltip；
   * **每周视图**：近 12 周使用量直方分布柱；
   * **累计总量**：提示词输入、生成输出、深度思考与上下文缓存细分统计。
-* 🎨 **原生深色主题对齐（Native Onyx Aesthetics）**  
-  完全移除突兀的浮动药丸/气泡框，不重复展示原生已有的配额面板，与 Antigravity 底栏模型选择器（`button[data-testid="model-selector-trigger"]`）保持 100% 相同字号、间距与幽灵悬浮交互质感。
+* 🎨 **原生明暗双主题自适应（Native Onyx Light & Dark）**  
+  自动监听并实时同步 Antigravity 日间/夜间主题（`theme-light` / `dark`），完全移除突兀的浮动药丸/气泡框，不重复展示原生已有的配额面板，与 Antigravity 底栏模型选择器（`button[data-testid="model-selector-trigger"]`）保持 100% 相同字号、间距与幽灵悬浮交互质感。
 * 🔒 **100% 纯本地只读，零云端 RPC 请求（Zero RPC / Safe IPC）**  
   不触碰 React Fiber 内部客户端，不对 Google 云端发起任何 RPC 或网络请求，不收集账号密码或凭据，仅在本地对话 SQLite 数据库实际变更时增量解析，挂机闲置零开销、零风控风险。
 
