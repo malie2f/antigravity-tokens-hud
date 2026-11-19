@@ -13,29 +13,20 @@ CONVERSATIONS_DIR = os.path.expanduser("~/.gemini/antigravity/conversations")
 CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stats_cache.json")
 CACHE_SCHEMA_VERSION = 11
 
-POOL_META = {
-    "gemini_pro": ("Gemini Pro 池", 0),
-    "gemini_flash": ("Gemini Flash 池", 1),
-    "claude": ("Claude 池", 2),
-    "gpt": ("GPT / 其他", 3),
-}
-
-
-def normalize_model_info(model_name, display_name=""):
+def normalize_model_label(model_name, display_name=""):
     m = (model_name or "").strip().lower()
     dn = (display_name or "").strip()
 
-    # Determine Antigravity Quota Pool
     if "claude" in m or "claude" in dn.lower():
-        pool = "claude"
+        family = "claude"
     elif "gpt" in m or "openai" in m or "gpt" in dn.lower():
-        pool = "gpt"
+        family = "gpt"
     elif "flash" in m or "lite" in m or "flash" in dn.lower() or "lite" in dn.lower():
-        pool = "gemini_flash"
+        family = "flash"
     elif "gemini" in m or "orchestrator" in m or "gemini" in dn.lower() or "orchestrator" in dn.lower():
-        pool = "gemini_pro"
+        family = "pro"
     else:
-        pool = "gpt" if m else "gemini_pro"
+        family = "other"
 
     # Canonical clean model label (merge internal A/B suffixes like -tiered, -trial, -c, -d, -w, -safety-le)
     if "worker" in m:
@@ -69,7 +60,7 @@ def normalize_model_info(model_name, display_name=""):
     else:
         label = "未知模型"
 
-    return pool, POOL_META[pool][0], label
+    return family, label
 
 
 def decode_varint(data, offset):
@@ -593,68 +584,32 @@ def collect_metrics(current_conv_id=None):
         tot_in = cac + inp
         hit_pct = round((cac / tot_in) * 100, 1) if tot_in > 0 else 0.0
 
-        pool_buckets = {}
+        model_buckets = {}
         for _, r in filtered:
-            pool_key, pool_label, m_label = normalize_model_info(r.get("m", ""), r.get("dn", ""))
-            pb = pool_buckets.get(pool_key)
-            if pb is None:
-                pb = {
-                    "pool": pool_key,
-                    "label": pool_label,
-                    "reqs": 0,
-                    "inp": 0,
-                    "out": 0,
-                    "cac": 0,
-                    "models": {},
-                }
-                pool_buckets[pool_key] = pb
-            pb["reqs"] += 1
-            pb["inp"] += r["p"]
-            pb["out"] += r["o"]
-            pb["cac"] += r["c"]
-
-            mb = pb["models"].get(m_label)
+            family, m_label = normalize_model_label(r.get("m", ""), r.get("dn", ""))
+            mb = model_buckets.get(m_label)
             if mb is None:
-                mb = {"label": m_label, "reqs": 0, "inp": 0, "out": 0, "cac": 0}
-                pb["models"][m_label] = mb
+                mb = {"label": m_label, "family": family, "reqs": 0, "inp": 0, "out": 0, "cac": 0}
+                model_buckets[m_label] = mb
             mb["reqs"] += 1
             mb["inp"] += r["p"]
             mb["out"] += r["o"]
             mb["cac"] += r["c"]
 
-        by_pool = []
-        for pool_key, pb in sorted(
-            pool_buckets.items(),
-            key=lambda kv: (-(kv[1]["inp"] + kv[1]["out"]), POOL_META[kv[0]][1]),
-        ):
-            p_new = pb["inp"] + pb["out"]
-            p_tot = p_new + pb["cac"]
-            p_in_sum = pb["inp"] + pb["cac"]
-            p_hit = round((pb["cac"] / p_in_sum) * 100, 1) if p_in_sum > 0 else 0.0
-            models_list = []
-            for mb in sorted(pb["models"].values(), key=lambda x: -(x["inp"] + x["out"])):
-                m_new = mb["inp"] + mb["out"]
-                m_tot = m_new + mb["cac"]
-                m_in_sum = mb["inp"] + mb["cac"]
-                m_hit = round((mb["cac"] / m_in_sum) * 100, 1) if m_in_sum > 0 else 0.0
-                models_list.append(
-                    {
-                        "label": mb["label"],
-                        "total_requests": mb["reqs"],
-                        "new_tokens": m_new,
-                        "total_tokens": m_tot,
-                        "cache_hit_percent": m_hit,
-                    }
-                )
-            by_pool.append(
+        by_model = []
+        for mb in sorted(model_buckets.values(), key=lambda x: -(x["inp"] + x["out"])):
+            m_new = mb["inp"] + mb["out"]
+            m_tot = m_new + mb["cac"]
+            m_in_sum = mb["inp"] + mb["cac"]
+            m_hit = round((mb["cac"] / m_in_sum) * 100, 1) if m_in_sum > 0 else 0.0
+            by_model.append(
                 {
-                    "pool": pool_key,
-                    "label": pb["label"],
-                    "total_requests": pb["reqs"],
-                    "new_tokens": p_new,
-                    "total_tokens": p_tot,
-                    "cache_hit_percent": p_hit,
-                    "models": models_list,
+                    "label": mb["label"],
+                    "family": mb["family"],
+                    "total_requests": mb["reqs"],
+                    "new_tokens": m_new,
+                    "total_tokens": m_tot,
+                    "cache_hit_percent": m_hit,
                 }
             )
 
@@ -667,7 +622,7 @@ def collect_metrics(current_conv_id=None):
             "cache_hit_percent": hit_pct,
             "new_tokens": inp + out,
             "total_tokens": cac + inp + out,
-            "by_pool": by_pool,
+            "by_model": by_model,
         }
 
     h5_recs = [(s, r) for s, r in all_records if r["ts"] >= h5_ts]

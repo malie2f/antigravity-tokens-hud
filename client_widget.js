@@ -438,10 +438,10 @@
     }
   };
 
-  function getPoolDotColor(pool, T) {
-    if (pool === "gemini_pro") return T.accent;
-    if (pool === "gemini_flash") return T.green;
-    if (pool === "claude") return T.amber;
+  function getModelDotColor(family, T) {
+    if (family === "pro") return T.accent;
+    if (family === "flash") return T.green;
+    if (family === "claude") return T.amber;
     return T.textMuted;
   }
 
@@ -449,9 +449,9 @@
     const win = activeUsageTab === "7d"
       ? (data?.usage_weekly || {})
       : (activeUsageTab === "hist" ? (data?.usage_historical || {}) : (data?.usage_5h || {}));
-    const pools = Array.isArray(win.by_pool) ? win.by_pool : [];
+    const models = Array.isArray(win.by_model) ? win.by_model : [];
 
-    if (!win.total_requests || pools.length === 0) {
+    if (!win.total_requests || models.length === 0) {
       return `
         <div style="padding: 10px 0; text-align: center; font-size: 11.5px; color: ${T.textDim};">
           该时间窗口内暂无模型调用记录
@@ -467,41 +467,22 @@
       <div style="display: flex; justify-content: flex-end; font-size: 10px; color: ${T.textDim}; margin-bottom: 6px;">
         <span>新增 / 总吞吐 (命中率)</span>
       </div>
-      <div style="max-height: 196px; overflow-y: auto; padding-right: 2px;">
-        ${pools.map((p, idx) => {
-          const dotColor = getPoolDotColor(p.pool, T);
-          const models = Array.isArray(p.models) ? p.models : [];
+      <div style="max-height: 175px; overflow-y: auto; padding-right: 2px; display: flex; flex-direction: column; gap: 5px;">
+        ${models.map(m => {
+          const dotColor = getModelDotColor(m.family, T);
           return `
-            <div style="${idx > 0 ? 'margin-top: 8px;' : ''}">
-              <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11.5px;">
-                <span style="display: inline-flex; align-items: center; gap: 5px; color: ${T.text}; font-weight: 600;">
-                  <span style="width: 6px; height: 6px; border-radius: 50%; background: ${dotColor}; flex-shrink: 0;"></span>
-                  <span>${p.label}</span>
-                </span>
-                <span style="color: ${T.text}; font-weight: 500; font-size: 11.5px;">
-                  <span style="color: ${dotColor};">${fmtTok(p.new_tokens || 0)}</span>
-                  <span style="color: ${T.slash}; margin: 0 2px;">/</span>
-                  <span>${fmtTok(p.total_tokens || 0)}</span>
-                  <span style="color: ${T.green}; font-size: 10px; margin-left: 3px;">(${(p.cache_hit_percent || 0).toFixed(0)}%)</span>
-                  <span style="color: ${T.textMuted}; font-size: 10px; margin-left: 2px;">(${p.total_requests || 0}次)</span>
-                </span>
-              </div>
-              ${models.length > 0 ? `
-                <div style="margin: 3px 0 0 8px; padding-left: 8px; border-left: 1px solid ${T.divider}; display: flex; flex-direction: column; gap: 2.5px;">
-                  ${models.map(m => `
-                    <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px;">
-                      <span style="color: ${T.textSub}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 138px;" title="${m.label}">${m.label}</span>
-                      <span style="color: ${T.textMuted}; white-space: nowrap;">
-                        <span style="color: ${T.textSub}; font-weight: 500;">${fmtTok(m.new_tokens || 0)}</span>
-                        <span style="color: ${T.slash}; margin: 0 2px;">/</span>
-                        <span>${fmtTok(m.total_tokens || 0)}</span>
-                        <span style="color: ${T.textDim}; font-size: 9.5px; margin-left: 2px;">(${(m.cache_hit_percent || 0).toFixed(0)}%)</span>
-                        <span style="color: ${T.textDim}; font-size: 9.5px; margin-left: 1px;">(${m.total_requests || 0}次)</span>
-                      </span>
-                    </div>
-                  `).join("")}
-                </div>
-              ` : ""}
+            <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11.5px;">
+              <span style="display: inline-flex; align-items: center; gap: 5px; color: ${T.textSub}; min-width: 0; max-width: 146px;" title="${m.label}">
+                <span style="width: 5.5px; height: 5.5px; border-radius: 50%; background: ${dotColor}; flex-shrink: 0;"></span>
+                <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${m.label}</span>
+              </span>
+              <span style="color: ${T.text}; font-weight: 500; white-space: nowrap;">
+                <span style="color: ${dotColor};">${fmtTok(m.new_tokens || 0)}</span>
+                <span style="color: ${T.slash}; margin: 0 2px;">/</span>
+                <span>${fmtTok(m.total_tokens || 0)}</span>
+                <span style="color: ${T.green}; font-size: 10px; margin-left: 3px;">(${(m.cache_hit_percent || 0).toFixed(0)}%)</span>
+                <span style="color: ${T.textMuted}; font-size: 10px; margin-left: 2px;">(${m.total_requests || 0}次)</span>
+              </span>
             </div>
           `;
         }).join("")}
@@ -798,7 +779,7 @@
 
         <div style="height: 1px; background: ${PT.divider}; margin: 12px 0;"></div>
 
-        <!-- Section 3: 近期消耗 (按配额池与模型精准拆分) -->
+        <!-- Section 3: 近期消耗 (按模型真实统计，不臆测配额) -->
         <div>
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
             <span style="font-size: 13.5px; font-weight: 600; color: ${PT.title}; letter-spacing: -0.2px;">近期消耗</span>
