@@ -68,6 +68,40 @@ WshShell.Run "node ""$TargetDir\index.js""", 0, False
 Set-Content -Path $vbsPath -Value $vbsContent -Encoding ASCII
 Write-Host "✅ Configured Windows Startup auto-launch: $vbsPath" -ForegroundColor Green
 
+# 4.5. Ensure Antigravity shortcuts enable DevTools debugging port (--remote-debugging-port=0)
+Write-Host "🔌 Configuring Antigravity shortcuts for DevTools HUD attachment..." -ForegroundColor Yellow
+try {
+    $wshShell = New-Object -ComObject WScript.Shell
+    $shortcutDirs = @(
+        [Environment]::GetFolderPath("Desktop"),
+        [Environment]::GetFolderPath("CommonDesktopDirectory"),
+        [Environment]::GetFolderPath("Programs"),
+        [Environment]::GetFolderPath("CommonPrograms"),
+        "$env:APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"
+    ) | Where-Object { $_ -and (Test-Path $_) }
+
+    $patchedCount = 0
+    foreach ($dir in $shortcutDirs) {
+        Get-ChildItem -Path $dir -Filter "*Antigravity*.lnk" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                $sc = $wshShell.CreateShortcut($_.FullName)
+                if ($sc.TargetPath -and ($sc.TargetPath -like "*\Antigravity.exe")) {
+                    $curArgs = if ($sc.Arguments) { $sc.Arguments.Trim() } else { "" }
+                    if ($curArgs -notmatch "--remote-debugging-port(?:=|\s)") {
+                        $sc.Arguments = if ($curArgs) { "$curArgs --remote-debugging-port=0" } else { "--remote-debugging-port=0" }
+                        $sc.Save()
+                        $patchedCount++
+                        Write-Host "   ✅ Added --remote-debugging-port=0: $($_.FullName)" -ForegroundColor Green
+                    }
+                }
+            } catch {}
+        }
+    }
+    if ($patchedCount -eq 0) {
+        Write-Host "   ℹ️ Shortcuts already include --remote-debugging-port (or none matched)." -ForegroundColor Gray
+    }
+} catch {}
+
 # 5. Start HUD Daemon Immediately (Detached from any terminal/IDE Job Object via WMI)
 Write-Host "🚀 Launching background daemon..." -ForegroundColor Yellow
 try {

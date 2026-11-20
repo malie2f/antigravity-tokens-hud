@@ -113,7 +113,7 @@ flowchart LR
 
 * **Node.js**：`v18.0.0` 或更高版本（Node 22+ 原生支持 WebSocket，低版本支持自动降级 `ws`）
 * **Python**：`3.9` 或更高版本（内置标准库 `sqlite3`、`json`、`datetime`，无需安装额外第三方 pip 包）
-* **Google Antigravity**：支持 Antigravity 2.0 及更高版本
+* **Google Antigravity**：支持 Antigravity 2.0 及更高版本（Windows 安装脚本会自动为原生快捷方式追加 `--remote-debugging-port=0`；macOS/Linux 或手动启动时请确保启动参数带有 `--remote-debugging-port=0`）
 
 ---
 
